@@ -11,11 +11,19 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <signal.h>
-#include "tcp_server.h"
+#include "rts.h"
 
 #define PEER_CLOSE 0x01
 #define PEER_READ  0x02
 #define PEER_WRITE 0x04
+
+static int is_close(const rts_peer_t* peer) {
+    return peer->_internal_flags & PEER_CLOSE;
+}
+
+static void set_close(rts_peer_t* peer) {
+    peer->_internal_flags |= PEER_CLOSE;
+}
 
 static int try_listen(const char *node, const char *service, int backlog) {
     struct addrinfo hints;
@@ -64,8 +72,8 @@ static int non_blocking_socket(int fd) {
 
 static int try_accept(
     int listen_fd,
-    peer_t *peer,
-    int(*on_connect)(peer_t* peer, struct sockaddr_storage* addr)
+    rts_peer_t *peer,
+    void(*on_connect)(rts_peer_t* peer, struct sockaddr_storage* addr)
 ) {
     struct sockaddr_storage addr;
     socklen_t addr_len = sizeof(addr);
@@ -80,7 +88,8 @@ static int try_accept(
         return -1;
     }
     peer->_internal_fd = fd;
-    if (on_connect(peer, &addr) != 0) {
+    on_connect(peer, &addr);
+    if (is_close(peer)) {
         close(fd);
         return -1;
     }
@@ -91,8 +100,8 @@ static int read_buffer(
     int fd,
     char *buf,
     int buf_length,
-    peer_t *peer,
-    int(*on_read)(peer_t* peer, char *buf, size_t length)
+    rts_peer_t *peer,
+    void(*on_read)(rts_peer_t* peer, char *buf, size_t length)
 ) {
     while (1) {
         int len = read(fd, buf, buf_length);
@@ -100,27 +109,26 @@ static int read_buffer(
             return -1; // connection close by peer
         } else if (len < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                return 0; // end of stream
+                return 0; // end of read buffer
             } else {
                 perror("read");
                 return -1;
             }
         } else {
-            if (on_read(peer, buf, len) < 0) {
+            on_read(peer, buf, len);
+            if (is_close(peer)) {
                 return -1;
-            } else {
-                return 0;
             }
         }
     }
 }
 
-static int epoll_loop(int listen_fd, const conf_t* conf) {
+static int epoll_loop(int listen_fd, const rts_conf_t* conf) {
     const int num_read_buffer = conf->num_read_buffer;
     const int num_max_connection = conf->num_max_connection;
-    int(*on_connect)(peer_t* peer, struct sockaddr_storage* addr) = conf->on_connect;
-    int(*on_read)(peer_t* peer, char *buf, size_t length) = conf->on_read;
-    void(*on_close)(peer_t* peer) = conf->on_close;
+    void(*on_connect)(rts_peer_t* peer, struct sockaddr_storage* addr) = conf->on_connect;
+    void(*on_read)(rts_peer_t* peer, char *buf, size_t length) = conf->on_read;
+    void(*on_close)(rts_peer_t* peer) = conf->on_close;
 
     const int MAX_EVENTS = 1024;
     char *buf = malloc(num_read_buffer);
@@ -138,7 +146,7 @@ static int epoll_loop(int listen_fd, const conf_t* conf) {
     }
 
     int num_connections = 0;
-    peer_t* new_peer = malloc(sizeof(peer_t));
+    rts_peer_t* new_peer = malloc(sizeof(rts_peer_t));
     while(1) {
         int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
         if (nfds < 0) {
@@ -161,15 +169,15 @@ static int epoll_loop(int listen_fd, const conf_t* conf) {
                     perror("epoll_ctl: add");
                     close(fd);
                 }
-                new_peer = malloc(sizeof(peer_t));
+                new_peer = malloc(sizeof(rts_peer_t));
                 ++num_connections;
             } else {
-                peer_t *peer = (peer_t*)events[i].data.ptr;
+                rts_peer_t *peer = (rts_peer_t*)events[i].data.ptr;
                 int fd = peer->_internal_fd;
                 if (read_buffer(fd, buf, num_read_buffer, peer, on_read) < 0) {
                     on_close(peer);
                     if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, &ev) < 0) {
-                        perror("epll_ctl: delete");
+                        perror("epll_ctl: del");
                     }
                     if (close(fd) < 0) {
                         perror("close");
@@ -187,7 +195,7 @@ static int epoll_loop(int listen_fd, const conf_t* conf) {
     return 0;
 }
 
-int run_tcp_server(const conf_t* conf) {
+int rts_main(const rts_conf_t* conf) {
     signal(SIGPIPE, SIG_IGN);
     int listen_fd = try_listen(conf->node, conf->service, conf->backlog);
     if (listen_fd < 0) {
@@ -196,17 +204,14 @@ int run_tcp_server(const conf_t* conf) {
     return epoll_loop(listen_fd, conf);
 }
 
-void peer_send(peer_t* peer, char *buf, size_t length) {
+void rts_send(rts_peer_t* peer, char *buf, size_t length) {
     // TODO lazy write
     if(write(peer->_internal_fd, buf, length) < 0) {
         perror("write");
     }
 }
 
-void peer_close(peer_t* peer) {
-    // TODO with lazy write
-    peer->_internal_flags |= PEER_WRITE;
-    if (close(peer->_internal_fd)) {
-        perror("close");
-    }
+void rts_close(rts_peer_t* peer) {
+    // TODO with lazy close
+    set_close(peer);
 }

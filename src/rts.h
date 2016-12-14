@@ -7,7 +7,7 @@ typedef struct {
     void* user;
     int _internal_fd;
     int _internal_flags;
-} peer_t;
+} rts_peer_t;
 
 typedef struct {
     const char *node;
@@ -17,14 +17,13 @@ typedef struct {
     int num_read_buffer;
     int num_read_timeout;
     int num_max_connection;
-    int(*on_connect)(peer_t* peer, struct sockaddr_storage* addr);
-    int(*on_read)(peer_t* peer, char *buf, size_t length);
-    void(*on_close)(peer_t* peer);
-} conf_t;
+    void(*on_connect)(rts_peer_t* peer, struct sockaddr_storage* addr);
+    void(*on_read)(rts_peer_t* peer, char *buf, size_t length);
+    void(*on_close)(rts_peer_t* peer);
+} rts_conf_t;
 
-
-void peer_send(peer_t* peer, char *buf, size_t length);
-void peer_close(peer_t* peer);
-int run_tcp_server(const conf_t* conf);
+void rts_send(rts_peer_t* peer, char *buf, size_t length);
+void rts_close(rts_peer_t* peer);
+int rts_main(const rts_conf_t* conf);
 
 #endif
