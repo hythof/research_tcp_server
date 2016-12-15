@@ -10,6 +10,7 @@ typedef struct {
 static uint32_t events_by_peer(rts_peer_t* peer) {
     int sending = is_sending(peer);
     int reading = is_reading(peer);
+
     if (sending && reading) {
         return EPOLLIN | EPOLLOUT | EPOLLET;
     } else if (sending) {
@@ -24,13 +25,11 @@ static uint32_t events_by_peer(rts_peer_t* peer) {
 static void event_accept(rts_t* rts, epoll_t* epoll, struct epoll_event* ev) {
     int epoll_fd = epoll->fd;
     rts_peer_t* peer = rts->pool_peer;
+    init_peer(peer);
+
+    // accept
     int fd = try_accept(rts, peer);
     if (fd < 0) {
-        return;
-    }
-    if (rts->num_connections >= rts->conf.num_max_connections) {
-        rts->stat.close_max_connections++;
-        close(fd);
         return;
     }
     peer->fd = fd;
@@ -42,7 +41,6 @@ static void event_accept(rts_t* rts, epoll_t* epoll, struct epoll_event* ev) {
     // judge next events
     int32_t new_events = events_by_peer(peer);
     if (new_events == 0) {
-        rts->stat.close_normal++;
         goto CLOSE;
     }
     ev->events = new_events;
@@ -51,20 +49,16 @@ static void event_accept(rts_t* rts, epoll_t* epoll, struct epoll_event* ev) {
     ev->data.ptr = (void*)peer;
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, ev) < 0) {
         perror("epoll_ctl: add");
-        rts->stat.close_error++;
         goto CLOSE;
     }
 
     // update status
     rts->num_connections++;
-    rts->pool_peer = peer_alloc();
+    rts->pool_peer = malloc(sizeof(rts_peer_t));
 
     return;
 CLOSE:
-    rts->conf.on_close(peer);
-    if (close(fd) < 0) {
-        perror("close");
-    }
+    close_peer(rts, peer);
 }
 
 static void event_handle(rts_t* rts, epoll_t* epoll, struct epoll_event* ev) {
@@ -82,42 +76,37 @@ static void event_handle(rts_t* rts, epoll_t* epoll, struct epoll_event* ev) {
         ev->events = new_events;
         if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, ev) < 0) {
             perror("epoll_ctl: mod");
-            rts->stat.close_error++;
             goto CLOSE;
         }
     } else {
-        rts->stat.close_normal++;
         goto CLOSE;
     }
 
     return;
 
 CLOSE:
-    rts->conf.on_close(peer);
     if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, ev) < 0) {
         perror("epll_ctl: del");
     }
-    if (close(fd) < 0) {
-        perror("close");
-    }
+    close_peer(rts, peer);
     free(peer);
     rts->num_connections--;
 }
 
 int event_main(rts_t* rts) {
-    const int MAX_EVENTS = 1024;
+    const int event_count = 1024;
 
     int epoll_fd = epoll_create1(0);
     if (epoll_fd < 0) {
         perror("epoll_create1");
         return -1;
     }
-    struct epoll_event *events = malloc(sizeof(struct epoll_event) * MAX_EVENTS);
+    struct epoll_event *events = malloc(sizeof(struct epoll_event) * event_count);
 
     epoll_t epoll;
     epoll.fd = epoll_fd;
     epoll.events = events;
-    epoll.count = MAX_EVENTS;
+    epoll.count = event_count;
 
     struct epoll_event ev;
     ev.events = EPOLLIN;
@@ -128,7 +117,7 @@ int event_main(rts_t* rts) {
     }
 
     while (1) {
-        int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+        int nfds = epoll_wait(epoll_fd, events, event_count, -1);
         if (nfds < 0) {
             if (rts->is_shutdown) {
                 break;
