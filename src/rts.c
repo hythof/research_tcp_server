@@ -17,12 +17,6 @@
 #define PEER_READING   0x01
 #define PEER_SENDING   0x02
 
-typedef struct {
-    int    fd;
-    struct epoll_event *events;
-    size_t count;
-} epoll_t;
-
 static void unset_reading(rts_peer_t* peer) {
     peer->flags &= ~PEER_READING;
 }
@@ -133,6 +127,7 @@ static void fill_read_buffer(
         if (len == 0) {
             // connection close by peer
             unset_reading(peer);
+            rts->stat.close_by_peer++;
             return;
         } else if (len < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -146,6 +141,7 @@ static void fill_read_buffer(
         } else {
             rts->stat.read_bytes += len;
             rts->conf.on_read(peer, buf, len);
+            rts->stat.read_count++;
         }
     }
 }
@@ -167,6 +163,7 @@ static void flush_send_buffer(rts_t* rts, rts_peer_t* peer) {
             unset_sending(peer);
             rts->stat.write_bytes += ret;
             rts->conf.on_send_end(peer, 0);
+            rts->stat.write_count++;
         } else {
             peer->send_offset += ret;
             rts->stat.write_bytes += ret;
@@ -174,148 +171,30 @@ static void flush_send_buffer(rts_t* rts, rts_peer_t* peer) {
     }
 }
 
-uint32_t events_by_peer(rts_peer_t* peer) {
-    int sending = is_sending(peer);
-    int reading = is_reading(peer);
-    if (sending && reading) {
-        return EPOLLIN | EPOLLOUT | EPOLLET;
-    } else if (sending) {
-        return EPOLLOUT | EPOLLET;
-    } else if (reading) {
-        return EPOLLIN | EPOLLET;
-    } else {
-        return 0;
-    }
+#define UNUSE(X) (void)X
+static void noop_on_connect(rts_peer_t* peer) {
+    UNUSE(peer);
 }
-
-static void event_loop(rts_t* rts, epoll_t* epoll) {
-    int epoll_fd = epoll->fd;
-    struct epoll_event *events = epoll->events;
-    int events_count = epoll->count;
-
-    int nfds = epoll_wait(epoll_fd, events, events_count, -1);
-    if (nfds < 0) {
-        if (rts->is_shutdown) {
-            return;
-        } else {
-            perror("epoll_wait");
-            return;
-        }
-    }
-
-    for (int i=0; i<nfds; ++i) {
-        struct epoll_event* ev = &events[i];
-        if (ev->data.ptr == NULL) {
-            // accept
-            rts_peer_t* new_peer = rts->pool_peer;
-            int fd = try_accept(rts, new_peer);
-            if (fd < 0) {
-                continue;
-            }
-            if (rts->num_connections >= rts->conf.num_max_connections) {
-                rts->stat.close_max_connections++;
-                close(fd);
-                continue;
-            }
-            new_peer->fd = fd;
-
-            // handle callback
-            rts->conf.on_connect(new_peer);
-            flush_send_buffer(rts, new_peer);
-
-            // judge next events
-            int32_t new_events = events_by_peer(new_peer);
-            if (new_events == 0) {
-                rts->stat.close_normal++;
-                goto CLOSE_ACCEPT;
-            }
-            ev->events = new_events;
-
-            // epoll add
-            ev->data.ptr = (void*)new_peer;
-            if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, ev) < 0) {
-                perror("epoll_ctl: add");
-                rts->stat.close_error++;
-                goto CLOSE_ACCEPT;
-            }
-
-            // misc
-            rts->num_connections++;
-            rts->pool_peer = peer_alloc();
-
-            continue;
-CLOSE_ACCEPT:
-            rts->conf.on_close(new_peer);
-            if (close(fd) < 0) {
-                perror("close");
-            }
-
-        } else {
-            rts_peer_t *peer = (rts_peer_t*)ev->data.ptr;
-            int fd = peer->fd;
-
-            // handle callback
-            fill_read_buffer(rts, fd, peer);
-            flush_send_buffer(rts, peer);
-
-            // judge next events
-            uint32_t new_events = events_by_peer(peer);
-            if (new_events > 0) {
-                ev->events = new_events;
-                if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, ev) < 0) {
-                    perror("epoll_ctl: mod");
-                    rts->stat.close_error++;
-                    goto CLOSE_CURRENT;
-                }
-            } else {
-                rts->stat.close_normal++;
-                goto CLOSE_CURRENT;
-            }
-
-            continue;
-CLOSE_CURRENT:
-            rts->conf.on_close(peer);
-            if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, ev) < 0) {
-                perror("epll_ctl: del");
-            }
-            if (close(fd) < 0) {
-                perror("close");
-            }
-            free(peer);
-            rts->num_connections--;
-        }
-    }
+static void noop_on_read(rts_peer_t* peer, char *buf, size_t length) {
+    rts_send(peer, buf, length);
+    rts_close(peer);
 }
-
-static int event_main(rts_t* rts) {
-    int epoll_fd = epoll_create1(0);
-    if (epoll_fd < 0) {
-        perror("epoll_create1");
-        return -1;
-    }
-
-    const int MAX_EVENTS = 1024;
-    epoll_t epoll;
-    epoll.fd = epoll_fd;
-    epoll.events = malloc(sizeof(struct epoll_event) * MAX_EVENTS);
-    epoll.count = MAX_EVENTS;
-
-    struct epoll_event ev;
-    ev.events = EPOLLIN;
-    ev.data.ptr = NULL;
-    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, rts->listen_fd, &ev)) {
-        free(epoll.events);
-        return -1;
-    }
-
-    while (!rts->is_shutdown) {
-        event_loop(rts, &epoll);
-    }
-    free(epoll.events);
-
-    return 0;
+static void noop_on_close(rts_peer_t* peer) {
+    UNUSE(peer);
 }
+static void noop_on_send_end(rts_peer_t* peer, int success) {
+    UNUSE(peer);
+    UNUSE(success);
+}
+#undef UNUSE
 
+// -- switch platform -------------------------------------
+// TODO support kqueue and poll
+#if EPOLL_CTL_ADD
+#include "rts_epoll.h"
+#endif
+
+// -- public interface ------------------------------------
 int rts_main(rts_t* rts) {
     signal(SIGPIPE, SIG_IGN);
     int listen_fd = try_listen(rts);
@@ -344,21 +223,6 @@ void rts_shutdown(rts_t* rts) {
     rts->is_shutdown = 1;
 }
 
-#define UNUSE(X) (void)X
-static void noop_on_connect(rts_peer_t* peer) {
-    UNUSE(peer);
-}
-static void noop_on_read(rts_peer_t* peer, char *buf, size_t length) {
-    rts_send(peer, buf, length);
-    rts_close(peer);
-}
-static void noop_on_close(rts_peer_t* peer) {
-    UNUSE(peer);
-}
-static void noop_on_send_end(rts_peer_t* peer, int success) {
-    UNUSE(peer);
-    UNUSE(success);
-}
 rts_t* rts_alloc() {
     rts_t* rts = malloc(sizeof(rts_t));
     memset(rts, 0, sizeof(rts_t));
@@ -383,22 +247,26 @@ void rts_dump(FILE* stream, rts_t* rts) {
     rts_conf_t* c = &(rts->conf);
     rts_stat_t* s = &(rts->stat);
     fprintf(stream, "-- rts statistics\n"
-"node              %s\n"
-"service           %s\n"
-"accept            %llu\n"
-"read bytes        %llu\n"
-"write bytes       %llu\n"
-"close             %llu\n"
-"  normal          %llu\n"
-"  error           %llu\n"
-"  max_connections %llu\n",
+"node                  %s\n"
+"service               %s\n"
+"accept                %llu\n"
+"read count            %llu\n"
+"write count           %llu\n"
+"read bytes            %llu\n"
+"write bytes           %llu\n"
+"close normal          %llu\n"
+"close by peer         %llu\n"
+"close error           %llu\n"
+"close max_connections %llu\n",
   c->node,
   c->service,
   s->accept,
+  s->read_count,
+  s->write_count,
   s->read_bytes,
   s->write_bytes,
-  s->close_normal + s->close_error + s->close_max_connections,
   s->close_normal,
+  s->close_by_peer,
   s->close_error,
   s->close_max_connections);
 }

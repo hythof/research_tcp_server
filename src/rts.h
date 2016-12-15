@@ -1,5 +1,5 @@
-#ifndef __TCP_SERVER_H__
-#define __TCP_SERVER_H__
+#ifndef __RTS_H__
+#define __RTS_H__
 
 #include <sys/socket.h>
 #include <sys/uio.h>
@@ -29,9 +29,12 @@ typedef struct {
 
 typedef struct {
     unsigned long long accept;
+    unsigned long long read_count;
+    unsigned long long write_count;
     unsigned long long read_bytes;
     unsigned long long write_bytes;
     unsigned long long close_normal;
+    unsigned long long close_by_peer;
     unsigned long long close_error;
     unsigned long long close_max_connections;
 } rts_stat_t;
