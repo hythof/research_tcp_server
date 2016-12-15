@@ -1,13 +1,11 @@
 #include <stdio.h>
 #include <string.h>
+#include <signal.h>
 #include "rts.h"
 
 #define UNUSE(X) (void)X
 
-static void on_connect(rts_peer_t* peer, struct sockaddr_storage* addr) {
-    UNUSE(peer);
-    UNUSE(addr);
-}
+rts_t* rts;
 
 static void on_read(rts_peer_t* peer, char *buf, size_t length) {
     UNUSE(buf);
@@ -24,25 +22,25 @@ static void on_read(rts_peer_t* peer, char *buf, size_t length) {
     rts_close(peer);
 }
 
-static void on_close(rts_peer_t* peer) {
-    UNUSE(peer);
+static int run_http_server(const char *service) {
+    rts = rts_alloc();
+    rts->conf.service = service;
+    rts->conf.on_read = on_read;
+    int ret = rts_main(rts);
+    rts_dump(stdout, rts);
+    rts_free(rts);
+    return ret;
 }
 
-int run_http_server(const char *node, const char *service, int backlog) {
-    rts_conf_t conf;
-    conf.node = node;
-    conf.service = service;
-    conf.backlog = backlog;
-    conf.num_threads = 0;
-    conf.num_read_buffer = 8192;
-    conf.num_read_timeout = 1000;
-    conf.num_max_connection = 1000;
-    conf.on_connect = on_connect;
-    conf.on_read = on_read;
-    conf.on_close = on_close;
-    return rts_main(&conf);
+void handle_signal(int no) {
+    if (no == SIGUSR1) {
+        rts_shutdown(rts);
+    }
 }
 
 int main() {
-    return run_http_server("*", "8880", 1024);
+    if (signal(SIGUSR1, handle_signal) == SIG_ERR) {
+        perror("signal");
+    }
+    return run_http_server("8880");
 }
