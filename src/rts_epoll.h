@@ -54,7 +54,7 @@ static void event_accept(rts_t* rts, epoll_t* epoll, struct epoll_event* ev) {
 
     // update status
     rts->num_connections++;
-    rts->pool_peer = malloc(sizeof(rts_peer_t));
+    rts->pool_peer = x_malloc(rts, sizeof(rts_peer_t));
 
     return;
 CLOSE:
@@ -89,7 +89,7 @@ CLOSE:
         perror("epll_ctl: del");
     }
     close_peer(rts, peer);
-    free(peer);
+    x_free(rts, peer);
     rts->num_connections--;
 }
 
@@ -101,7 +101,7 @@ int event_main(rts_t* rts) {
         perror("epoll_create1");
         return -1;
     }
-    struct epoll_event *events = malloc(sizeof(struct epoll_event) * event_count);
+    struct epoll_event *events = x_malloc(rts, sizeof(struct epoll_event) * event_count);
 
     epoll_t epoll;
     epoll.fd = epoll_fd;
@@ -112,7 +112,7 @@ int event_main(rts_t* rts) {
     ev.events = EPOLLIN;
     ev.data.ptr = NULL;
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, rts->listen_fd, &ev)) {
-        free(epoll.events);
+        x_free(rts, epoll.events);
         return -1;
     }
 
@@ -135,7 +135,7 @@ int event_main(rts_t* rts) {
             }
         }
     }
-    free(events);
+    x_free(rts, events);
 
     return 0;
 }

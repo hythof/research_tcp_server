@@ -37,6 +37,8 @@ typedef struct {
     unsigned long long close_by_peer;
     unsigned long long close_error;
     unsigned long long close_max_connections;
+    unsigned long long malloc_count;
+    unsigned long long free_count;
 } rts_stat_t;
 
 typedef struct {

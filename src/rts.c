@@ -1,4 +1,3 @@
-#include <pthread.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
@@ -17,6 +16,16 @@
 #define PEER_READING   0x01
 #define PEER_SENDING   0x02
 #define PEER_CLOSE     0x04
+
+static void* x_malloc(rts_t* rts, size_t size) {
+    rts->stat.malloc_count++;
+    return malloc(size);
+}
+
+static void x_free(rts_t* rts, void* ptr) {
+    rts->stat.free_count++;
+    free(ptr);
+}
 
 static void unset_reading(rts_peer_t* peer) {
     peer->flags &= ~PEER_READING;
@@ -284,16 +293,21 @@ void rts_dump(FILE* stream, rts_t* rts) {
 "close normal          %llu\n"
 "close by peer         %llu\n"
 "close error           %llu\n"
-"close max_connections %llu\n",
-  c->node,
-  c->service,
-  s->accept,
-  s->read_count,
-  s->write_count,
-  s->read_bytes,
-  s->write_bytes,
-  s->close_normal,
-  s->close_by_peer,
-  s->close_error,
-  s->close_max_connections);
+"close max_connections %llu\n"
+"malloc count          %llu\n"
+"free count            %llu\n"
+  , c->node
+  , c->service
+  , s->accept
+  , s->read_count
+  , s->write_count
+  , s->read_bytes
+  , s->write_bytes
+  , s->close_normal
+  , s->close_by_peer
+  , s->close_error
+  , s->close_max_connections
+  , s->malloc_count
+  , s->free_count
+  );
 }
