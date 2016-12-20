@@ -1,24 +1,27 @@
 #include <stdio.h>
-#include "tcp_server.h"
+#include "test.h"
 
-int port = 8900;
+static const int port = 8900;
 
-static void server(void(*test)()) {
-    conf_t conf;
-    conf.node = "*";
-    conf.service = "     ";
-    conf.backlog = 1024;
-    conf.num_read_buffer = 8192;
-    conf.num_read_timeout = 1000;
-    conf.num_max_connection = 1000;
-    conf.on_connect
-    test();
+static int send_recv(int fd, size_t size) {
+    char* msg = malloc(size + 1);
+    memset(msg, 'a', size);
+    msg[size - 1] = 'Z';
+    msg[size] = '\0';
+    return post(fd, msg)
+        || check(fd, msg);
 }
 
-static void test_single() {
+static int test1(int fd) {
+    return send_recv(fd, 1);
+}
 
+static int test2(int fd) {
+    return send_recv(fd, 1 * 1000);
 }
 
 int main() {
-    test_single();
+    env(test1);
+    env(test2);
+    puts("");
 }

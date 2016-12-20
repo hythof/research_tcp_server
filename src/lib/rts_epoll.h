@@ -54,7 +54,7 @@ static void event_accept(rts_t* rts, epoll_t* epoll, struct epoll_event* ev) {
 
     // update status
     rts->num_connections++;
-    rts->pool_peer = x_malloc(rts, sizeof(rts_peer_t));
+    rts->pool_peer = malloc_peer();
 
     return;
 CLOSE:
@@ -67,8 +67,12 @@ static void event_handle(rts_t* rts, epoll_t* epoll, struct epoll_event* ev) {
     int fd = peer->fd;
 
     // handle callback
-    fill_read_buffer(rts, fd, peer);
-    flush_send_buffer(rts, peer);
+    if (ev->events & EPOLLIN) {
+        fill_read_buffer(rts, fd, peer);
+    }
+    if (ev->events & EPOLLOUT) {
+        flush_send_buffer(rts, peer);
+    }
 
     // judge next events
     uint32_t new_events = events_by_peer(peer);
@@ -89,7 +93,7 @@ CLOSE:
         perror("epll_ctl: del");
     }
     close_peer(rts, peer);
-    x_free(rts, peer);
+    free(peer);
     rts->num_connections--;
 }
 
@@ -101,7 +105,7 @@ int event_main(rts_t* rts) {
         perror("epoll_create1");
         return -1;
     }
-    struct epoll_event *events = x_malloc(rts, sizeof(struct epoll_event) * event_count);
+    struct epoll_event *events = malloc(sizeof(struct epoll_event) * event_count);
 
     epoll_t epoll;
     epoll.fd = epoll_fd;
@@ -112,11 +116,11 @@ int event_main(rts_t* rts) {
     ev.events = EPOLLIN;
     ev.data.ptr = NULL;
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, rts->listen_fd, &ev)) {
-        x_free(rts, epoll.events);
+        free(epoll.events);
         return -1;
     }
 
-    while (1) {
+    while (!rts->is_shutdown) {
         int nfds = epoll_wait(epoll_fd, events, event_count, -1);
         if (nfds < 0) {
             if (rts->is_shutdown) {
@@ -135,7 +139,7 @@ int event_main(rts_t* rts) {
             }
         }
     }
-    x_free(rts, events);
+    free(events);
 
     return 0;
 }

@@ -1,14 +1,24 @@
-run: compile
-	@./bin/rts
+CC=gcc -O3 -std=c11 -Wall -W -D_POSIX_C_SOURCE=201112L -I src/lib/ -pthread
+
+test: compile
+	@./bin/test
+
+valgrind: compile
+	@valgrind --tool=massif ./bin/benchmark &
+	@-ab -q -n 4 -c 2 http://localhost:8880/ | grep Request
+	@valgrind --tool=callgrind ./bin/benchmark &
+	@-ab -q -n 4 -c 2 http://localhost:8880/ | grep Request
+	@pkill -USR1 benchmark
+
+benchmark: compile
+	@./bin/benchmark &
+	@-ab -q -n 10000 -c 1000 http://localhost:8880/ | grep Request
+	@pkill -USR1 benchmark
 
 compile:
 	@mkdir -p bin
-	@gcc -O3 -std=c11 -Wall -W -D_POSIX_C_SOURCE=201112L src/*.c -o bin/rts
-
-benchmark: compile
-	@./bin/rts &
-	@-ab -q -n 10000 -c 1000 http://localhost:8880/ | grep Request
-	@pkill -USR1 rts
+	@${CC} benchmark/main.c src/lib/*.c -o bin/benchmark
+	@${CC} test/main.c src/lib/*.c -o bin/test
 
 benchmark_go:
 	@go run benchmark/httpd.go &
@@ -17,17 +27,17 @@ benchmark_go:
 	@pkill httpd
 
 longrun: compile
-	@./bin/rts &
+	@./bin/benchmark &
 	@ps u | head -n 1
-	@ps u | grep bin/rts | grep -v grep
+	@ps u | grep bin/benchmark | grep -v grep
 	@-ab -q -n 1 -c 1 http://localhost:8880/ > /dev/null
-	@ps u | grep bin/rts | grep -v grep
+	@ps u | grep bin/benchmark | grep -v grep
 	@-ab -q -n 1000 -c 1000 http://localhost:8880/ > /dev/null
-	@ps u | grep bin/rts | grep -v grep
+	@ps u | grep bin/benchmark | grep -v grep
 	@-ab -q -n 10000 -c 1000 http://localhost:8880/ > /dev/null
-	@ps u | grep bin/rts | grep -v grep
+	@ps u | grep bin/benchmark | grep -v grep
 	@-ab -q -n 10000 -c 1000 http://localhost:8880/ > /dev/null
-	@ps u | grep bin/rts | grep -v grep
+	@ps u | grep bin/benchmark | grep -v grep
 	@-ab -q -n 10000 -c 1000 http://localhost:8880/ > /dev/null
-	@ps u | grep bin/rts | grep -v grep
-	@pkill -USR1 rts
+	@ps u | grep bin/benchmark | grep -v grep
+	@pkill -USR1 benchmark

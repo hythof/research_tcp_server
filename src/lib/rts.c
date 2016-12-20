@@ -11,21 +11,14 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
+#include <assert.h>
 #include "rts.h"
 
-#define PEER_READING   0x01
-#define PEER_SENDING   0x02
-#define PEER_CLOSE     0x04
-
-static void* x_malloc(rts_t* rts, size_t size) {
-    rts->stat.malloc_count++;
-    return malloc(size);
-}
-
-static void x_free(rts_t* rts, void* ptr) {
-    rts->stat.free_count++;
-    free(ptr);
-}
+#define PEER_READING     0x01
+#define PEER_SENDING     0x02
+#define PEER_CLOSE       0x04
+#define PEER_BROKEN_READ 0x08
+#define PEER_BROKEN_SEND 0x10
 
 static void unset_reading(rts_peer_t* peer) {
     peer->flags &= ~PEER_READING;
@@ -35,8 +28,19 @@ static void unset_sending(rts_peer_t* peer) {
     peer->flags &= ~PEER_SENDING;
 }
 
+static void set_broken_read(rts_peer_t* peer) {
+    peer->flags |= PEER_BROKEN_READ;
+    unset_reading(peer);
+}
+
+static void set_broken_send(rts_peer_t* peer) {
+    peer->flags |= PEER_BROKEN_SEND;
+    unset_sending(peer);
+}
+
 static void set_close(rts_peer_t* peer) {
     peer->flags |= PEER_CLOSE;
+    unset_reading(peer);
 }
 
 static void set_sending(rts_peer_t* peer) {
@@ -55,8 +59,21 @@ static int is_close(rts_peer_t* peer) {
     return peer->flags & PEER_CLOSE;
 }
 
+static rts_peer_t* malloc_peer() {
+    rts_peer_t* peer = malloc(sizeof(rts_peer_t));
+    peer->flags = PEER_READING;
+    peer->send_iov = peer->send_fixed_iov;
+    peer->send_offset = 0;
+    peer->send_len = 0;
+    peer->send_cap = sizeof(peer->send_fixed_iov) / sizeof(struct iovec);
+    assert(peer->send_cap == 4);
+    return peer;
+}
+
 static void init_peer(rts_peer_t* peer) {
     peer->flags = PEER_READING;
+    peer->send_offset = 0;
+    peer->send_len = 0;
 }
 
 static int try_listen(rts_t* rts) {
@@ -102,6 +119,7 @@ static int non_blocking_socket(int fd) {
         perror("fcntl");
         return -1;
     }
+    flags |= O_NONBLOCK;
     if (fcntl(fd, F_SETFL, flags) < 0) {
         perror("fcntl");
         return -1;
@@ -155,7 +173,7 @@ static void fill_read_buffer(
                 return;
             } else {
                 perror("read");
-                unset_reading(peer);
+                set_broken_read(peer);
                 return;
             }
         } else {
@@ -168,26 +186,42 @@ static void fill_read_buffer(
 
 static void flush_send_buffer(rts_t* rts, rts_peer_t* peer) {
     if (is_sending(peer)) {
-        int length = peer->send_length - peer->send_offset;
-        char* buf = peer->send_buf + peer->send_offset;
-        int ret = write(peer->fd, buf, length);
-        if(ret < 0) {
+        void* buf = peer->send_iov + peer->send_offset;
+        size_t buf_len = peer->send_len;
+        ssize_t writed = writev(peer->fd, buf, buf_len);
+        if(writed < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 // pass
             } else {
                 perror("write");
-                unset_sending(peer);
-                rts->conf.on_send_end(peer, 1);
+                set_broken_send(peer);
+                rts->conf.on_send_end(peer);
             }
-        } else if (ret == length) {
-            unset_sending(peer);
-            rts->conf.on_send_end(peer, 0);
-            rts->stat.write_bytes += ret;
-            rts->stat.write_count++;
         } else {
-            peer->send_offset += ret;
-            rts->stat.write_bytes += ret;
+            rts->stat.write_bytes += writed;
             rts->stat.write_count++;
+
+            size_t w = writed;
+            while (1) {
+                assert(peer->send_len > 0);
+                struct iovec* iov = peer->send_iov + peer->send_offset;
+                size_t len = iov->iov_len;
+                if (len < w) {
+                    w -= len;
+                    ++peer->send_offset;
+                    --peer->send_len;
+                } else {
+                    iov->iov_base += w;
+                    iov->iov_len -= w;
+                    if (iov->iov_len == 0) {
+                        unset_sending(peer);
+                        rts->conf.on_send_end(peer);
+                        peer->send_offset = 0;
+                        assert(peer->send_len == 1);
+                    }
+                    break;
+                }
+            }
         }
     }
 }
@@ -217,9 +251,8 @@ static void noop_on_read(rts_peer_t* peer, char *buf, size_t length) {
 static void noop_on_close(rts_peer_t* peer) {
     UNUSE(peer);
 }
-static void noop_on_send_end(rts_peer_t* peer, int success) {
+static void noop_on_send_end(rts_peer_t* peer) {
     UNUSE(peer);
-    UNUSE(success);
 }
 #undef UNUSE
 
@@ -239,19 +272,40 @@ int rts_main(rts_t* rts) {
     rts->listen_fd = listen_fd;
     rts->read_buffer = malloc(rts->conf.num_read_buffer);
     rts->read_buffer_length = rts->conf.num_read_buffer;
-    rts->pool_peer = malloc(sizeof(rts_peer_t));
-    return event_main(rts);
+    rts->pool_peer = malloc_peer();
+
+    rts->is_ready = 1;
+    int ret = event_main(rts);
+
+    if (close(listen_fd) < 0) {
+        perror("close");
+    }
+    return ret;
 }
 
-void rts_send(rts_peer_t* peer, char *buf, size_t length) {
-    peer->send_buf = buf;
-    peer->send_length = length;
-    peer->send_offset = 0;
+void rts_send(rts_peer_t* peer, void* buf, size_t length) {
+    assert(peer->send_len <= peer->send_cap);
+    assert(length > 0);
+    assert(buf != NULL);
+    if (peer->send_len == peer->send_cap) {
+        size_t cap = sizeof(struct iovec) * peer->send_len * 2;
+        peer->send_cap = cap;
+        if (peer->send_fixed_iov == peer->send_iov) {
+            peer->send_iov = malloc(cap);
+            memcpy(peer->send_iov, peer->send_fixed_iov, sizeof(peer->send_fixed_iov));
+        } else {
+            peer->send_iov = realloc(peer->send_iov, cap);
+        }
+    }
+    struct iovec* iov = peer->send_iov + peer->send_len;
+    iov->iov_base = buf;
+    iov->iov_len = length;
+    ++peer->send_len;
+
     set_sending(peer);
 }
 
 void rts_close(rts_peer_t* peer) {
-    unset_reading(peer);
     set_close(peer);
 }
 
@@ -294,8 +348,6 @@ void rts_dump(FILE* stream, rts_t* rts) {
 "close by peer         %llu\n"
 "close error           %llu\n"
 "close max_connections %llu\n"
-"malloc count          %llu\n"
-"free count            %llu\n"
   , c->node
   , c->service
   , s->accept
@@ -307,7 +359,5 @@ void rts_dump(FILE* stream, rts_t* rts) {
   , s->close_by_peer
   , s->close_error
   , s->close_max_connections
-  , s->malloc_count
-  , s->free_count
   );
 }
