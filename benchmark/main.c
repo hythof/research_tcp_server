@@ -6,19 +6,19 @@
 #define UNUSE(X) (void) X
 
 rts_t rts;
+char response[] =
+  "HTTP/1.0 200 OK\r\n"
+  "Date: Fri, 16 Dec 2016 03:51:21 GMT\r\n"
+  "Server: c\r\n"
+  "Content-Type: text/plain; charset=utf-8\r\n"
+  "Connection: Close\r\n"
+  "Content-Length: 2\r\n"
+  "\r\n"
+  "ok";
 
 static void on_read(rts_peer_t *peer, char *buf, size_t length) {
   UNUSE(buf);
   UNUSE(length);
-  char response[] =
-      "HTTP/1.0 200 OK\r\n"
-      "Date: Fri, 16 Dec 2016 03:51:21 GMT\r\n"
-      "Server: c\r\n"
-      "Content-Type: text/plain; charset=utf-8\r\n"
-      "Connection: Close\r\n"
-      "Content-Length: 2\r\n"
-      "\r\n"
-      "ok";
   rts_send(peer, response, strlen(response));
   rts_close(peer);
 }

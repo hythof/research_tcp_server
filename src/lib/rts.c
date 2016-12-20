@@ -12,6 +12,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <assert.h>
+#include <pthread.h>
 #include "rts.h"
 
 #define PEER_READING 0x01
@@ -29,10 +30,8 @@ static int is_broken_read(rts_peer_t *peer) {
 static int is_reading(rts_peer_t *peer) { return peer->flags & PEER_READING; }
 static int is_sending(rts_peer_t *peer) { return peer->flags & PEER_SENDING; }
 static int is_close(rts_peer_t *peer) { return peer->flags & PEER_CLOSE; }
-
 static void unset_reading(rts_peer_t *peer) { peer->flags &= ~PEER_READING; }
 static void unset_sending(rts_peer_t *peer) { peer->flags &= ~PEER_SENDING; }
-
 static void set_broken_read(rts_peer_t *peer) {
   assert(!is_broken_read(peer));
 
@@ -130,18 +129,18 @@ static int non_blocking_socket(int fd) {
   return 0;
 }
 
-static int try_accept(rts_t *rts, rts_peer_t *peer) {
-  const int listen_fd = rts->listen_fd;
+static int try_accept(rts_thread_t *thread, rts_peer_t *peer) {
+  const int listen_fd = thread->listen_fd;
   socklen_t addr_len = sizeof(struct sockaddr_storage);
   int fd = accept(listen_fd, (struct sockaddr *)&(peer->addr), &addr_len);
   if (fd < 0) {
     perror("accept");
     goto ERROR;
   }
-  rts->stat.accept++;
+  thread->stat.accept++;
 
-  if (rts->num_connections >= rts->conf.num_max_connections) {
-    rts->stat.close_max_connections++;
+  if (thread->num_connections >= thread->conf.num_max_connections) {
+    thread->stat.close_max_connections++;
     goto ERROR;
   }
 
@@ -156,9 +155,9 @@ ERROR:
   return -1;
 }
 
-static void fill_read_buffer(rts_t *rts, int fd, rts_peer_t *peer) {
-  char *buf = rts->read_buffer;
-  size_t buf_length = rts->read_buffer_length;
+static void fill_read_buffer(rts_thread_t *thread, int fd, rts_peer_t *peer) {
+  char *buf = thread->read_buffer;
+  size_t buf_length = thread->read_buffer_length;
 
   while (is_reading(peer)) {
     ssize_t readed = read(fd, buf, buf_length);
@@ -176,17 +175,17 @@ static void fill_read_buffer(rts_t *rts, int fd, rts_peer_t *peer) {
         return;
       }
     } else {
-      rts->stat.read_bytes += readed;
-      rts->stat.read_count++;
-      rts->conf.on_read(peer, buf, readed);
+      thread->stat.read_bytes += readed;
+      thread->stat.read_count++;
+      thread->conf.on_read(peer, buf, readed);
     }
   }
 }
 
-static void flush_send_buffer(rts_t *rts, rts_peer_t *peer) {
+static void flush_send_buffer(rts_thread_t *thread, rts_peer_t *peer) {
   if (is_sending(peer)) {
     struct iovec *iov = peer->send_iov + peer->send_offset;
-    size_t iov_len = peer->send_len;
+    size_t iov_len = peer->send_len - peer->send_offset;
     ssize_t writed = writev(peer->fd, iov, iov_len);
 
     if (writed < 0) {
@@ -195,12 +194,12 @@ static void flush_send_buffer(rts_t *rts, rts_peer_t *peer) {
       } else {
         perror("write");
         set_broken_send(peer);
-        rts->conf.on_send_end(peer);
+        thread->conf.on_send_end(peer);
       }
-    } else {
-      rts->stat.write_bytes += writed;
-      rts->stat.write_count++;
 
+    } else {
+      thread->stat.write_bytes += writed;
+      thread->stat.write_count++;
       size_t w = writed;
       while (1) {
         assert(peer->send_len > 0);
@@ -209,15 +208,13 @@ static void flush_send_buffer(rts_t *rts, rts_peer_t *peer) {
         if (len < w) {
           w -= len;
           ++peer->send_offset;
-          --peer->send_len;
         } else {
-          iov->iov_base += w;
+          iov->iov_base = (char*)iov->iov_base + w;
           iov->iov_len -= w;
           if (iov->iov_len == 0) {
             unset_sending(peer);
-            rts->conf.on_send_end(peer);
+            thread->conf.on_send_end(peer);
             peer->send_offset = 0;
-            assert(peer->send_len == 1);
           }
           break;
         }
@@ -226,14 +223,14 @@ static void flush_send_buffer(rts_t *rts, rts_peer_t *peer) {
   }
 }
 
-static void close_peer(rts_t *rts, rts_peer_t *peer) {
-  rts->conf.on_close(peer);
+static void close_peer(rts_thread_t *thread, rts_peer_t *peer) {
+  thread->conf.on_close(peer);
   if (is_close(peer)) {
-    rts->stat.close_normal++;
+    thread->stat.close_normal++;
   } else if (is_reading(peer)) {
-    rts->stat.close_error++;
+    thread->stat.close_error++;
   } else {
-    rts->stat.close_by_peer++;
+    thread->stat.close_by_peer++;
   }
   if (close(peer->fd) < 0) {
     perror("close");
@@ -242,10 +239,7 @@ static void close_peer(rts_t *rts, rts_peer_t *peer) {
 
 #define UNUSE(X) (void) X
 static void noop_on_connect(rts_peer_t *peer) { UNUSE(peer); }
-static void noop_on_read(rts_peer_t *peer, char *buf, size_t length) {
-  rts_send(peer, buf, length);
-  rts_close(peer);
-}
+static void noop_on_read(rts_peer_t *peer, char *buf, size_t len) { rts_close(peer); UNUSE(buf); UNUSE(len); }
 static void noop_on_close(rts_peer_t *peer) { UNUSE(peer); }
 static void noop_on_send_end(rts_peer_t *peer) { UNUSE(peer); }
 #undef UNUSE
@@ -256,24 +250,56 @@ static void noop_on_send_end(rts_peer_t *peer) { UNUSE(peer); }
 #include "rts_epoll.h"
 #endif
 
+static void* spawn_server(void* arg) {
+    rts_thread_t *thread = (rts_thread_t*)arg;
+    event_main(thread);
+    return NULL;
+}
+
 // -- public interface ------------------------------------
 int rts_main(rts_t *rts) {
+  assert(rts->conf.num_threads > 0);
+
   signal(SIGPIPE, SIG_IGN);
   int listen_fd = try_listen(rts);
   if (listen_fd < 0) {
     return -1;
   }
-  rts->listen_fd = listen_fd;
-  rts->read_buffer = malloc(rts->conf.num_read_buffer);
-  rts->read_buffer_length = rts->conf.num_read_buffer;
-  rts->pool_peer = malloc_peer();
+  rts->num_threads = rts->conf.num_threads;
+  rts->threads = malloc(sizeof(rts_thread_t) * rts->num_threads);
+  memset(rts->threads, 0, sizeof(rts_thread_t) * rts->num_threads);
+  for (int i=0; i<rts->conf.num_threads; ++i) {
+    rts_thread_t *th = rts->threads + i;
+    th->listen_fd = listen_fd;
+    th->conf = rts->conf;
+    th->read_buffer_length = rts->conf.num_read_buffer;
+    th->read_buffer = malloc(rts->conf.num_read_buffer);
+    th->pool_peer = malloc_peer();
+  }
 
   rts->is_ready = 1;
-  int ret = event_main(rts);
+  for (int i=1; i<rts->conf.num_threads; ++i) {
+    rts_thread_t *th = rts->threads + i;
+    if (pthread_create(&th->pthread, NULL, spawn_server, (void *)th) < 0) {
+      perror("pthread_create");
+    }
+  }
+  int ret = event_main(rts->threads);
+
+  for (int i=1; i<rts->conf.num_threads; ++i) {
+    rts_thread_t *th = rts->threads + i;
+    if (pthread_join(th->pthread, NULL) < 0) {
+      perror("pthread_join");
+    }
+  }
   rts->is_ready = 0;
 
-  free(rts->read_buffer);
-  free_peer(rts->pool_peer);
+  for (int i=0; i<rts->conf.num_threads; ++i) {
+    rts_thread_t *th = rts->threads + i;
+    free(th->read_buffer);
+    free_peer(th->pool_peer);
+  }
+  free(rts->threads);
 
   if (close(listen_fd) < 0) {
     perror("close");
@@ -307,13 +333,19 @@ void rts_send(rts_peer_t *peer, void *buf, size_t length) {
 
 void rts_close(rts_peer_t *peer) { set_close(peer); }
 
-void rts_shutdown(rts_t *rts) { rts->is_shutdown = 1; }
+void rts_shutdown(rts_t *rts) {
+  for(int i=0; i<rts->num_threads; ++i) {
+    rts_thread_t *th = rts->threads + i;
+    th->is_shutdown = 1;
+  }
+}
 
 void rts_init(rts_t *rts) {
   memset(rts, 0, sizeof(rts_t));
   rts->conf.node = "*";
   rts->conf.service = "8888";
   rts->conf.backlog = 1024;
+  rts->conf.num_threads = 8;
   rts->conf.num_read_buffer = 8192;
   rts->conf.num_read_timeout_ms = 1000;
   rts->conf.num_max_connections = 1000;
@@ -325,7 +357,21 @@ void rts_init(rts_t *rts) {
 
 void rts_dump(FILE *stream, rts_t *rts) {
   rts_conf_t *c = &(rts->conf);
-  rts_stat_t *s = &(rts->stat);
+  rts_stat_t a;
+  memset(&a, 0, sizeof(rts_stat_t));
+  for (int i=0; i<rts->num_threads; ++i) {
+    rts_thread_t *th = rts->threads + i;
+    rts_stat_t *s = &(th->stat);
+    a.accept += s->accept;
+    a.read_count += s->read_count;
+    a.write_count += s->write_count;
+    a.read_bytes += s->read_bytes;
+    a.write_bytes += s->write_bytes;
+    a.close_normal += s->close_normal;
+    a.close_by_peer += s->close_by_peer;
+    a.close_error += s->close_error;
+    a.close_max_connections += s->close_max_connections;
+  }
   fprintf(stream,
           "-- rts statistics\n"
           "node                  %s\n"
@@ -339,7 +385,7 @@ void rts_dump(FILE *stream, rts_t *rts) {
           "close by peer         %llu\n"
           "close error           %llu\n"
           "close max_connections %llu\n",
-          c->node, c->service, s->accept, s->read_count, s->write_count,
-          s->read_bytes, s->write_bytes, s->close_normal, s->close_by_peer,
-          s->close_error, s->close_max_connections);
+          c->node, c->service, a.accept, a.read_count, a.write_count,
+          a.read_bytes, a.write_bytes, a.close_normal, a.close_by_peer,
+          a.close_error, a.close_max_connections);
 }
