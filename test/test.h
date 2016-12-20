@@ -13,17 +13,20 @@
 #include <arpa/inet.h>
 #include "rts.h"
 
-rts_t *rts = NULL;
+rts_t rts;
 
-static void on_read(rts_peer_t *peer, char *buf, size_t length) {
-  char *echo = malloc(length);
-  memcpy(echo, buf, length);
-  rts_send(peer, echo, length);
+static void on_read(rts_peer_t *peer, char *buf, size_t len) {
+  char *echo = malloc(len);
+  memcpy(echo, buf, len);
+  peer->user = echo;
+  rts_send(peer, echo, len);
 }
+
+static void on_send_end(rts_peer_t *peer) { free(peer->user); }
 
 static void handle_signal(int no) {
   if (no == SIGUSR1) {
-    rts_shutdown(rts);
+    rts_shutdown(&rts);
   }
 }
 
@@ -32,13 +35,13 @@ static void run_echo_server(const char *service) {
     perror("signal");
   }
 
-  rts = rts_alloc();
-  rts->conf.service = service;
-  rts->conf.on_read = on_read;
-  int ret = rts_main(rts);
+  rts_init(&rts);
+  rts.conf.service = service;
+  rts.conf.on_read = on_read;
+  rts.conf.on_send_end = on_send_end;
+  rts.conf.num_max_connections = 2;
+  int ret = rts_main(&rts);
   assert(ret == 0);
-  rts_free(rts);
-  rts = NULL;
 }
 
 static void *spawn_server(void *arg) {
@@ -47,23 +50,7 @@ static void *spawn_server(void *arg) {
   return NULL;
 }
 
-static void wait_tick() {
-  struct timespec ts;
-  ts.tv_sec = 0;
-  ts.tv_nsec = 1000;
-  nanosleep(&ts, &ts);
-}
-
-static void env(int (*f)(int)) {
-  pthread_t pt;
-  if (pthread_create(&pt, NULL, spawn_server, NULL) < 0) {
-    perror("pthread_create");
-    return;
-  }
-  while (rts == NULL || !rts->is_ready) {
-    wait_tick();
-  }
-
+static int do_connect() {
   int s = socket(AF_INET, SOCK_STREAM, 0);
   if (s < 0) {
     perror("socket");
@@ -80,10 +67,39 @@ static void env(int (*f)(int)) {
     close(s);
     exit(2);
   }
+  return s;
+}
 
-  fputc(f(s) == 0 ? '.' : 'F', stdout);
+static void wait_tick() {
+  struct timespec ts;
+  ts.tv_sec = 0;
+  ts.tv_nsec = 1000;
+  nanosleep(&ts, &ts);
+}
 
-  close(s);
+static void run(int (*f)(int), int n) {
+  pthread_t pt;
+  if (pthread_create(&pt, NULL, spawn_server, NULL) < 0) {
+    perror("pthread_create");
+    return;
+  }
+  while (!rts.is_ready) {
+    wait_tick();
+  }
+
+  int fds[n];
+  for (int i = 0; i < n; ++i) {
+    fds[i] = do_connect();
+  }
+  for (int i = 0; i < n; ++i) {
+    int s = fds[i];
+    fputc(f(s) == 0 ? '.' : 'F', stdout);
+  }
+  for (int i = 0; i < n; ++i) {
+    int s = fds[i];
+    close(s);
+  }
+
   if (raise(SIGUSR1) < 0) {
     perror("kill");
   }
@@ -96,40 +112,34 @@ static void env(int (*f)(int)) {
 #define min(A, B) (A < B ? A : B)
 
 static int post(int fd, char *msg) {
-  int len = strlen(msg) + 1;
-  int offset = 0;
-  int remain = len;
-  while (remain > 0) {
-    char *buf = msg + offset;
-    int buf_len = len - offset;
-    int writed = write(fd, buf, buf_len);
+  int len = strlen(msg);
+  while (len > 0) {
+    int writed = write(fd, msg, len);
     if (writed == -1) {
       perror("write");
       return -1;
     } else {
-      remain -= writed;
-      offset += writed;
+      msg += writed;
+      len -= writed;
     }
   }
   return 0;
 }
 
 static int check(int fd, const char *msg) {
-  int buf_len = strlen(msg) + 1;
-  char *buf = malloc(buf_len);
-  int offset = 0;
-  int remain = buf_len;
-  while (remain > 0) {
-    int readed = read(fd, buf + offset, remain);
+  size_t len = strlen(msg);
+  size_t rest = len;
+  char *buf = malloc(len + 1);
+  memset(buf, 0, len + 1);
+  while (rest > 0) {
+    int readed = read(fd, buf + (len - rest), rest);
     if (readed == -1) {
-      perror("write");
+      perror("read");
     } else if (readed == 0) {
       return -1;
     } else {
-      remain -= readed;
-      offset += readed;
+      rest -= readed;
     }
   }
-  return memcmp(msg, buf, buf_len);
-  ;
+  return memcmp(msg, buf, len);
 }

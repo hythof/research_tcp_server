@@ -53,8 +53,7 @@ typedef struct {
   rts_peer_t *pool_peer;
 } rts_t;
 
-rts_t *rts_alloc();
-void rts_free(rts_t *rts);
+void rts_init(rts_t *rts);
 int rts_main(rts_t *rts);
 void rts_shutdown(rts_t *rts);
 void rts_send(rts_peer_t *peer, void *buf, size_t length);

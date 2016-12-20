@@ -5,7 +5,7 @@
 
 #define UNUSE(X) (void) X
 
-rts_t *rts;
+rts_t rts;
 
 static void on_read(rts_peer_t *peer, char *buf, size_t length) {
   UNUSE(buf);
@@ -24,18 +24,17 @@ static void on_read(rts_peer_t *peer, char *buf, size_t length) {
 }
 
 static int run_http_server(const char *service) {
-  rts = rts_alloc();
-  rts->conf.service = service;
-  rts->conf.on_read = on_read;
-  int ret = rts_main(rts);
-  rts_dump(stdout, rts);
-  rts_free(rts);
+  rts_init(&rts);
+  rts.conf.service = service;
+  rts.conf.on_read = on_read;
+  int ret = rts_main(&rts);
+  rts_dump(stdout, &rts);
   return ret;
 }
 
 void handle_signal(int no) {
   if (no == SIGUSR1) {
-    rts_shutdown(rts);
+    rts_shutdown(&rts);
   }
 }
 

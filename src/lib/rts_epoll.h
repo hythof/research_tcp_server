@@ -93,7 +93,7 @@ CLOSE:
     perror("epll_ctl: del");
   }
   close_peer(rts, peer);
-  free(peer);
+  free_peer(peer);
   rts->num_connections--;
 }
 
