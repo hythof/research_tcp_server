@@ -3,6 +3,9 @@ CC=gcc -O3 -std=c11 -Wall -W -D_POSIX_C_SOURCE=201112L -I src/lib/ -pthread
 test: compile
 	@./bin/test
 
+format:
+	clang-format -style=Google -i benchmark/*.[ch] test/*.[ch] src/**/*.[ch]
+
 valgrind: compile
 	@valgrind --tool=massif ./bin/benchmark &
 	@-ab -q -n 4 -c 2 http://localhost:8880/ | grep Request
