@@ -31,7 +31,11 @@ static int is_reading(rts_peer_t *peer) { return peer->flags & PEER_READING; }
 static int is_sending(rts_peer_t *peer) { return peer->flags & PEER_SENDING; }
 static int is_close(rts_peer_t *peer) { return peer->flags & PEER_CLOSE; }
 static void unset_reading(rts_peer_t *peer) { peer->flags &= ~PEER_READING; }
-static void unset_sending(rts_peer_t *peer) { peer->flags &= ~PEER_SENDING; }
+static void unset_sending(rts_peer_t *peer) {
+  peer->send_offset = 0;
+  peer->send_len = 0;
+  peer->flags &= ~PEER_SENDING;
+}
 static void set_broken_read(rts_peer_t *peer) {
   assert(!is_broken_read(peer));
 
@@ -162,7 +166,7 @@ static void fill_read_buffer(rts_thread_t *thread, int fd, rts_peer_t *peer) {
   while (is_reading(peer)) {
     ssize_t readed = read(fd, buf, buf_length);
     if (readed == 0) {
-      // connection close by peer
+      // peer connection close or shutdown read
       unset_reading(peer);
       return;
     } else if (readed < 0) {
@@ -175,6 +179,7 @@ static void fill_read_buffer(rts_thread_t *thread, int fd, rts_peer_t *peer) {
         return;
       }
     } else {
+      peer->total_read_bytes += readed;
       thread->stat.read_bytes += readed;
       thread->stat.read_count++;
       thread->conf.on_read(peer, buf, readed);
@@ -213,8 +218,8 @@ static void flush_send_buffer(rts_thread_t *thread, rts_peer_t *peer) {
           iov->iov_len -= w;
           if (iov->iov_len == 0) {
             unset_sending(peer);
+            peer->total_write_bytes += writed;
             thread->conf.on_send_end(peer);
-            peer->send_offset = 0;
           }
           break;
         }
@@ -224,7 +229,17 @@ static void flush_send_buffer(rts_thread_t *thread, rts_peer_t *peer) {
 }
 
 static void close_peer(rts_thread_t *thread, rts_peer_t *peer) {
+  assert(is_sending(peer) == 0);
+  assert(is_reading(peer) == 0);
+  assert(peer->send_len == 0);
+
   thread->conf.on_close(peer);
+  if (peer->total_read_bytes == 0) {
+    thread->stat.empty_read_connections++;
+  }
+  if (peer->total_write_bytes == 0) {
+    thread->stat.empty_write_connections++;
+  }
   if (is_close(peer)) {
     thread->stat.close_normal++;
   } else if (is_reading(peer)) {
@@ -251,9 +266,9 @@ static void noop_on_send_end(rts_peer_t *peer) { UNUSE(peer); }
 #endif
 
 static void* spawn_server(void* arg) {
-    rts_thread_t *thread = (rts_thread_t*)arg;
-    event_main(thread);
-    return NULL;
+  rts_thread_t *thread = (rts_thread_t*)arg;
+  event_main(thread);
+  return NULL;
 }
 
 // -- public interface ------------------------------------
@@ -288,6 +303,9 @@ int rts_main(rts_t *rts) {
 
   for (int i=1; i<rts->conf.num_threads; ++i) {
     rts_thread_t *th = rts->threads + i;
+    if (pthread_cancel(th->pthread) < 0) {
+      perror("pthread_cancel");
+    }
     if (pthread_join(th->pthread, NULL) < 0) {
       perror("pthread_join");
     }
@@ -307,9 +325,9 @@ int rts_main(rts_t *rts) {
   return ret;
 }
 
-void rts_send(rts_peer_t *peer, void *buf, size_t length) {
+void rts_send(rts_peer_t *peer, void *buf, size_t len) {
   assert(peer->send_len <= peer->send_cap);
-  assert(length > 0);
+  assert(len > 0);
   assert(buf != NULL);
 
   if (peer->send_len == peer->send_cap) {
@@ -325,7 +343,7 @@ void rts_send(rts_peer_t *peer, void *buf, size_t length) {
   }
   struct iovec *iov = peer->send_iov + peer->send_len;
   iov->iov_base = buf;
-  iov->iov_len = length;
+  iov->iov_len = len;
   ++peer->send_len;
 
   set_sending(peer);
@@ -345,10 +363,10 @@ void rts_init(rts_t *rts) {
   rts->conf.node = "*";
   rts->conf.service = "8888";
   rts->conf.backlog = 1024;
-  rts->conf.num_threads = 8;
+  rts->conf.num_threads = 2;
   rts->conf.num_read_buffer = 8192;
   rts->conf.num_read_timeout_ms = 1000;
-  rts->conf.num_max_connections = 1000;
+  rts->conf.num_max_connections = 1000 * 1000;
   rts->conf.on_connect = noop_on_connect;
   rts->conf.on_read = noop_on_read;
   rts->conf.on_send_end = noop_on_send_end;
@@ -371,21 +389,26 @@ void rts_dump(FILE *stream, rts_t *rts) {
     a.close_by_peer += s->close_by_peer;
     a.close_error += s->close_error;
     a.close_max_connections += s->close_max_connections;
+    a.empty_read_connections += s->empty_read_connections;
+    a.empty_write_connections += s->empty_write_connections;
   }
   fprintf(stream,
           "-- rts statistics\n"
-          "node                  %s\n"
-          "service               %s\n"
-          "accept                %llu\n"
-          "read count            %llu\n"
-          "write count           %llu\n"
-          "read bytes            %llu\n"
-          "write bytes           %llu\n"
-          "close normal          %llu\n"
-          "close by peer         %llu\n"
-          "close error           %llu\n"
-          "close max_connections %llu\n",
+          "node                    %s\n"
+          "service                 %s\n"
+          "accept                  %llu\n"
+          "read count              %llu\n"
+          "write count             %llu\n"
+          "read bytes              %llu\n"
+          "write bytes             %llu\n"
+          "close normal            %llu\n"
+          "close by peer           %llu\n"
+          "close error             %llu\n"
+          "close max_connections   %llu\n"
+          "empty read connections  %llu\n"
+          "empty write connections %llu\n",
           c->node, c->service, a.accept, a.read_count, a.write_count,
           a.read_bytes, a.write_bytes, a.close_normal, a.close_by_peer,
-          a.close_error, a.close_max_connections);
+          a.close_error, a.close_max_connections, a.empty_read_connections,
+          a.empty_write_connections);
 }

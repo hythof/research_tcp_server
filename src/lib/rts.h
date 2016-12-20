@@ -14,6 +14,8 @@ typedef struct {
   int send_len;
   int send_cap;
   struct sockaddr_storage addr;
+  unsigned int total_read_bytes;
+  unsigned int total_write_bytes;
 } rts_peer_t;
 
 typedef struct {
@@ -40,6 +42,8 @@ typedef struct {
   unsigned long long close_by_peer;
   unsigned long long close_error;
   unsigned long long close_max_connections;
+  unsigned long long empty_read_connections;
+  unsigned long long empty_write_connections;
 } rts_stat_t;
 
 typedef struct {

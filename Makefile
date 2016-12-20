@@ -16,11 +16,6 @@ profile: compile
 	@echo "-- gperf"
 	@google-pprof --text bin/httpd_profile /tmp/cpu.prof
 
-benchmark: compile
-	@./bin/httpd_product &
-	@-ab -q -n 10000 -c 1000 http://localhost:8880/ | grep Request
-	@pkill -USR1 httpd_product
-
 compile:
 	@mkdir -p bin
 	@${PRODUCT_CC} benchmark/main.c src/lib/*.c -o bin/httpd_product
@@ -28,10 +23,16 @@ compile:
 	@${PROFILE_CC} benchmark/main.c src/lib/*.c -o bin/httpd_profile
 	@${DEVELOP_CC} test/main.c src/lib/*.c -o bin/test
 
+benchmark: compile
+	@./bin/httpd_product &
+	@-ab -q -n 100000 -c 1000 http://localhost:8880/
+	@pkill -USR1 httpd_product
+	@sleep 1
+
 benchmark_go:
 	@go run benchmark/httpd.go &
 	@sleep 1 # wait for spinup
-	@-ab -q -n 10000 -c 1000 http://localhost:8880/ | grep Request
+	@-ab -q -n 10000 -c 1000 http://localhost:8880/
 	@pkill httpd
 
 longrun: compile

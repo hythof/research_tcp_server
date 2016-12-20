@@ -1,6 +1,8 @@
 #ifndef __RTS_EPOLL_H__
 #define __RTS_EPOLL_H__
 
+pthread_mutex_t accept_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 typedef struct {
   int fd;
   struct epoll_event *events;
@@ -28,6 +30,8 @@ static void event_accept(rts_thread_t *thread, epoll_t *epoll, struct epoll_even
   init_peer(peer);
 
   // accept
+  pthread_mutex_lock(&accept_mutex);
+
   int fd = try_accept(thread, peer);
   if (fd < 0) {
     return;
@@ -56,8 +60,10 @@ static void event_accept(rts_thread_t *thread, epoll_t *epoll, struct epoll_even
   thread->num_connections++;
   thread->pool_peer = malloc_peer();
 
+  pthread_mutex_unlock(&accept_mutex);
   return;
 CLOSE:
+  pthread_mutex_unlock(&accept_mutex);
   close_peer(thread, peer);
 }
 
@@ -70,9 +76,7 @@ static void event_handle(rts_thread_t *thread, epoll_t *epoll, struct epoll_even
   if (ev->events & EPOLLIN) {
     fill_read_buffer(thread, fd, peer);
   }
-  if (ev->events & EPOLLOUT) {
-    flush_send_buffer(thread, peer);
-  }
+  flush_send_buffer(thread, peer);
 
   // judge next events
   uint32_t new_events = events_by_peer(peer);
@@ -122,7 +126,7 @@ int event_main(rts_thread_t *thread) {
   }
 
   while (!thread->is_shutdown) {
-    int nfds = epoll_wait(epoll_fd, events, event_count, 100);
+    int nfds = epoll_wait(epoll_fd, events, event_count, -1);
     if (nfds < 0) {
       if (thread->is_shutdown) {
         break;
