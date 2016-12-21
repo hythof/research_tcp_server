@@ -1,8 +1,6 @@
 #include <stdio.h>
 #include "test.h"
 
-static const int port = 8900;
-
 static int send_recv(int fd, size_t size) {
   char *msg = malloc(size + 1);
   memset(msg, 'a', size);
