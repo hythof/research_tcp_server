@@ -1,4 +1,4 @@
-BASE_CC=gcc -std=c11 -Wall -W -D_POSIX_C_SOURCE=201112L -I src/lib/ -pthread
+BASE_CC=gcc -std=c11 -Wall -W -D_GNU_SOURCE -D_POSIX_C_SOURCE=201112L -I src/lib/ -pthread
 PRODUCT_CC=${BASE_CC} -O2
 PROFILE_CC=${BASE_CC} -O2
 DEVELOP_CC=${BASE_CC} -O2 -g -fno-inline

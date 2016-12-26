@@ -1,6 +1,9 @@
+#include <features.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <netdb.h>
 #include <string.h>
 #include <stdio.h>
@@ -82,6 +85,20 @@ static void free_peer(rts_peer_t *peer) {
   free(peer);
 }
 
+static int non_blocking_socket(int fd) {
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags < 0) {
+    perror("fcntl");
+    return -1;
+  }
+  flags |= O_NONBLOCK;
+  if (fcntl(fd, F_SETFL, flags) < 0) {
+    perror("fcntl");
+    return -1;
+  }
+  return 0;
+}
+
 static int try_listen(rts_t *rts) {
   const char *node = rts->conf.node;
   const char *service = rts->conf.service;
@@ -107,6 +124,18 @@ static int try_listen(rts_t *rts) {
     perror("bind");
     goto ERROR;
   }
+
+  if (setsockopt(fd, SOL_TCP, TCP_DEFER_ACCEPT, &on, sizeof(on)) < 0) {
+    perror("setsockopt SO_REUSEADDR");
+    goto ERROR;
+  }
+
+  int fast = 4096;
+  if (setsockopt(fd, SOL_TCP, TCP_FASTOPEN, &fast, sizeof(fast)) < 0) {
+    perror("setsockopt SO_REUSEADDR");
+    goto ERROR;
+  }
+
   if (listen(fd, backlog) < 0) {
     perror("listen");
     goto ERROR;
@@ -119,27 +148,24 @@ ERROR:
   return -1;
 }
 
-static int non_blocking_socket(int fd) {
-  int flags = fcntl(fd, F_GETFL, 0);
-  if (flags < 0) {
-    perror("fcntl");
-    return -1;
-  }
-  flags |= O_NONBLOCK;
-  if (fcntl(fd, F_SETFL, flags) < 0) {
-    perror("fcntl");
-    return -1;
-  }
-  return 0;
-}
-
 static int try_accept(rts_thread_t *thread, rts_peer_t *peer) {
   const int listen_fd = thread->listen_fd;
   socklen_t addr_len = sizeof(struct sockaddr_storage);
+  static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+  if (pthread_mutex_lock(&mutex) < 0) {
+    perror("pthread_mutex_lock");
+    return -1;
+  }
   int fd = accept(listen_fd, (struct sockaddr *)&(peer->addr), &addr_len);
   if (fd < 0) {
     perror("accept");
-    goto ERROR;
+    if (pthread_mutex_unlock(&mutex) < 0) {
+      perror("pthread_mutex_unlock");
+    }
+    return -1;
+  }
+  if (pthread_mutex_unlock(&mutex) < 0) {
+    perror("pthread_mutex_unlock");
   }
   thread->stat.accept++;
 
@@ -152,6 +178,10 @@ static int try_accept(rts_thread_t *thread, rts_peer_t *peer) {
     goto ERROR;
   }
 
+  const int one = 1;
+  if (setsockopt(fd, SOL_TCP, TCP_NODELAY, &one, sizeof(one)) < 0) {
+    perror("setsockopt: TCP_NODELAY");
+  }
   return fd;
 
 ERROR:
@@ -362,7 +392,7 @@ void rts_init(rts_t *rts) {
   memset(rts, 0, sizeof(rts_t));
   rts->conf.node = "*";
   rts->conf.service = "8888";
-  rts->conf.backlog = 1024;
+  rts->conf.backlog = 65535;
   rts->conf.num_threads = 2;
   rts->conf.num_read_buffer = 8192;
   rts->conf.num_read_timeout_ms = 1000;
@@ -391,9 +421,29 @@ void rts_dump(FILE *stream, rts_t *rts) {
     a.close_max_connections += s->close_max_connections;
     a.empty_read_connections += s->empty_read_connections;
     a.empty_write_connections += s->empty_write_connections;
+    fprintf(stream,
+            "-- rts statistics %d\n"
+            "node                    %s\n"
+            "service                 %s\n"
+            "accept                  %llu\n"
+            "read count              %llu\n"
+            "write count             %llu\n"
+            "read bytes              %llu\n"
+            "write bytes             %llu\n"
+            "close normal            %llu\n"
+            "close by peer           %llu\n"
+            "close error             %llu\n"
+            "close max_connections   %llu\n"
+            "empty read connections  %llu\n"
+            "empty write connections %llu\n",
+            i,
+            c->node, c->service, s->accept, s->read_count, s->write_count,
+            s->read_bytes, s->write_bytes, s->close_normal, s->close_by_peer,
+            s->close_error, s->close_max_connections, s->empty_read_connections,
+            s->empty_write_connections);
   }
   fprintf(stream,
-          "-- rts statistics\n"
+          "-- rts statistics all\n"
           "node                    %s\n"
           "service                 %s\n"
           "accept                  %llu\n"

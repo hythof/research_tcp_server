@@ -126,7 +126,7 @@ int event_main(rts_thread_t *thread) {
   }
 
   while (!thread->is_shutdown) {
-    int nfds = epoll_wait(epoll_fd, events, event_count, -1);
+    int nfds = epoll_wait(epoll_fd, events, event_count, 10 * 1000);
     if (nfds < 0) {
       if (thread->is_shutdown) {
         break;
