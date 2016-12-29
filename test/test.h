@@ -47,13 +47,12 @@ static void run_echo_server(const char *service) {
   rts.conf.service = service;
   rts.conf.on_read = on_read;
   rts.conf.on_send_end = on_send_end;
-  rts.conf.num_max_connections = 2;
   int ret = rts_main(&rts);
   assert(ret == 0);
 }
 
 static void *spawn_server(void *arg) {
-  (void)arg;  // nowarn
+  (void)arg;
   run_echo_server("8880");
   return NULL;
 }
@@ -98,7 +97,7 @@ static void check_core(int cond, const char *file, int line) {
   }
 }
 
-static void run_test_core(int (*f)(int), int n) {
+static void run_test(int (*f)(int), int n) {
   pthread_t pt;
   if (pthread_create(&pt, NULL, spawn_server, NULL) < 0) {
     perror("test pthread_create");
@@ -122,10 +121,9 @@ static void run_test_core(int (*f)(int), int n) {
     close(s);
   }
 
-  while (1) {
+  for (int i=0; i<1000; ++i) {
     rts_stat(&rts, &stat);
-    if (stat.accept == (unsigned int)n && stat.current_connections == 0 &&
-        stat.close_by_peer == (unsigned int)n) {
+    if (stat.accept > 0 && stat.current_connections == 0) {
       break;
     }
     wait_tick();
@@ -139,12 +137,6 @@ static void run_test_core(int (*f)(int), int n) {
   }
 
   check(num_on_read == num_on_send_end);
-}
-static void run_test(int (*f)(int), int n) {
-  int backup_num_max_connections = rts.conf.num_max_connections;
-  rts.conf.num_max_connections = n;
-  run_test_core(f, n);
-  rts.conf.num_max_connections = backup_num_max_connections;
 }
 
 static int post(int fd, char *msg) {
