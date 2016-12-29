@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
@@ -14,6 +15,8 @@
 #include "rts.h"
 
 rts_t rts;
+rts_stat_t stat;
+int num_test_fail = 0;
 
 static void on_read(rts_peer_t *peer, char *buf, size_t len) {
   char *echo = malloc(len);
@@ -63,7 +66,6 @@ static int do_connect() {
   addr.sin_addr.s_addr = inet_addr("127.0.0.1");
   if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
     perror("connect()");
-    shutdown(s, SHUT_RDWR);
     close(s);
     exit(2);
   }
@@ -77,11 +79,25 @@ static void wait_tick() {
   nanosleep(&ts, &ts);
 }
 
-static void run(int (*f)(int), int n) {
+#define check(COND) check_core(COND, __FILE__, __LINE__)
+static void check_core(int cond, const char *file, int line) {
+  if (cond) {
+    fputc('.', stdout);
+  } else {
+    fputc('F', stdout);
+    ++num_test_fail;
+    fprintf(stderr, "-- test fail %s %d\n", file, line);
+    rts_dump(stderr, &rts);
+    fflush(stdout);
+    fflush(stderr);
+  }
+}
+
+static void run_test_core(int (*f)(int), int n) {
   pthread_t pt;
   if (pthread_create(&pt, NULL, spawn_server, NULL) < 0) {
     perror("pthread_create");
-    return;
+    exit(-1);
   }
   while (!rts.is_ready) {
     wait_tick();
@@ -93,11 +109,21 @@ static void run(int (*f)(int), int n) {
   }
   for (int i = 0; i < n; ++i) {
     int s = fds[i];
-    fputc(f(s) == 0 ? '.' : 'F', stdout);
+    check(f(s) == 0);
   }
+
   for (int i = 0; i < n; ++i) {
     int s = fds[i];
     close(s);
+  }
+
+  while (1) {
+    rts_stat(&rts, &stat);
+    if (stat.accept == (unsigned int)n && stat.current_connections == 0 &&
+        stat.close_by_peer == (unsigned int)n) {
+      break;
+    }
+    wait_tick();
   }
 
   if (raise(SIGUSR1) < 0) {
@@ -106,6 +132,12 @@ static void run(int (*f)(int), int n) {
   if (pthread_join(pt, NULL) < 0) {
     perror("pthread_join");
   }
+}
+static void run_test(int (*f)(int), int n) {
+  int backup_num_max_connections = rts.conf.num_max_connections;
+  rts.conf.num_max_connections = n;
+  run_test_core(f, n);
+  rts.conf.num_max_connections = backup_num_max_connections;
 }
 
 #define max(A, B) (A > B ? A : B)
@@ -126,7 +158,7 @@ static int post(int fd, char *msg) {
   return 0;
 }
 
-static int check(int fd, const char *msg) {
+static int recv_and_cmp(int fd, const char *msg) {
   size_t len = strlen(msg);
   size_t rest = len;
   char *buf = malloc(len + 1);

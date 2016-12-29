@@ -1,7 +1,7 @@
 BASE_CC=gcc -std=c11 -Wall -W -D_GNU_SOURCE -D_POSIX_C_SOURCE=201112L -I src/lib/ -pthread
 PRODUCT_CC=${BASE_CC} -O2
 PROFILE_CC=${BASE_CC} -O2
-DEVELOP_CC=${BASE_CC} -O2 -g -fno-inline
+DEVELOP_CC=${BASE_CC} -Og -g -fno-inline
 
 test: compile
 	@./bin/test
@@ -18,10 +18,10 @@ profile: compile
 
 compile:
 	@mkdir -p bin
-	@${PRODUCT_CC} benchmark/main.c src/lib/*.c -o bin/httpd_product
-	@${DEVELOP_CC} benchmark/main.c src/lib/*.c -o bin/httpd_develop
-	@${PROFILE_CC} benchmark/main.c src/lib/*.c -o bin/httpd_profile
-	@${DEVELOP_CC} test/main.c src/lib/*.c -o bin/test
+	@${PRODUCT_CC} benchmark/main.c src/lib/*.c -o bin/product
+	@${DEVELOP_CC} benchmark/main.c src/lib/*.c -o bin/develop
+	@${PROFILE_CC} benchmark/main.c src/lib/*.c -o bin/profile
+	@${DEVELOP_CC}      test/main.c src/lib/*.c -o bin/test
 
 benchmark: compile
 	@./bin/httpd_product &

@@ -1,7 +1,6 @@
 #include <features.h>
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <sys/epoll.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <netdb.h>
@@ -85,7 +84,7 @@ static void free_peer(rts_peer_t *peer) {
   free(peer);
 }
 
-static int non_blocking_socket(int fd) {
+static int set_non_blocking(int fd) {
   int flags = fcntl(fd, F_GETFL, 0);
   if (flags < 0) {
     perror("fcntl");
@@ -114,25 +113,31 @@ static int try_listen(rts_t *rts) {
     perror("getaddrinfo");
     return -1;
   }
-  int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-  int on = 1;
+  const int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+  const int off = 0;
+  const int on = 1;
+
+  if (set_non_blocking(fd) < 0) {
+    goto ERROR;
+  }
+
   if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0) {
     perror("setsockopt SO_REUSEADDR");
     goto ERROR;
   }
-  if (bind(fd, ai->ai_addr, ai->ai_addrlen) < 0) {
-    perror("bind");
+
+  if (setsockopt(fd, SOL_IPV6, IPV6_V6ONLY, &off, sizeof(on)) < 0) {
+    perror("setsockopt IPV6_V6ONLY");
     goto ERROR;
   }
 
   if (setsockopt(fd, SOL_TCP, TCP_DEFER_ACCEPT, &on, sizeof(on)) < 0) {
-    perror("setsockopt SO_REUSEADDR");
+    perror("setsockopt TCP_DEFER_ACCEPT");
     goto ERROR;
   }
 
-  int fast = 4096;
-  if (setsockopt(fd, SOL_TCP, TCP_FASTOPEN, &fast, sizeof(fast)) < 0) {
-    perror("setsockopt SO_REUSEADDR");
+  if (bind(fd, ai->ai_addr, ai->ai_addrlen) < 0) {
+    perror("bind");
     goto ERROR;
   }
 
@@ -140,6 +145,13 @@ static int try_listen(rts_t *rts) {
     perror("listen");
     goto ERROR;
   }
+
+  const int fast = 4096;
+  if (setsockopt(fd, SOL_TCP, TCP_FASTOPEN, &fast, sizeof(fast)) < 0) {
+    perror("setsockopt TCP_FASTOPEN");
+    goto ERROR;
+  }
+
   freeaddrinfo(ai);
   return fd;
 
@@ -148,40 +160,55 @@ ERROR:
   return -1;
 }
 
-static int try_accept(rts_thread_t *thread, rts_peer_t *peer) {
+static int try_accept(rts_thread_t *thread) {
   const int listen_fd = thread->listen_fd;
-  socklen_t addr_len = sizeof(struct sockaddr_storage);
-  static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-  if (pthread_mutex_lock(&mutex) < 0) {
-    perror("pthread_mutex_lock");
-    return -1;
-  }
-  int fd = accept(listen_fd, (struct sockaddr *)&(peer->addr), &addr_len);
+#if RTS_FEATURE_ACCEPT4
+  int fd = accept4(listen_fd, NULL, NULL, O_NONBLOCK);
   if (fd < 0) {
-    perror("accept");
-    if (pthread_mutex_unlock(&mutex) < 0) {
-      perror("pthread_mutex_unlock");
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      // pass
+    } else {
+      perror("accept");
     }
     return -1;
   }
-  if (pthread_mutex_unlock(&mutex) < 0) {
-    perror("pthread_mutex_unlock");
+#else
+  int fd = accept(listen_fd, NULL, NULL);
+  if (fd < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      // pass
+    } else {
+      perror("accept");
+    }
+    return -1;
   }
+  if (set_non_blocking(fd) < 0) {
+    goto ERROR;
+  }
+#endif
+
   thread->stat.accept++;
 
-  if (thread->num_connections >= thread->conf.num_max_connections) {
+  if (thread->stat.current_connections >= thread->conf.num_max_connections) {
     thread->stat.close_max_connections++;
     goto ERROR;
   }
 
-  if (non_blocking_socket(fd) < 0) {
-    goto ERROR;
-  }
-
-  const int one = 1;
-  if (setsockopt(fd, SOL_TCP, TCP_NODELAY, &one, sizeof(one)) < 0) {
+  const int on = 1;
+  if (setsockopt(fd, SOL_TCP, TCP_NODELAY, &on, sizeof(on)) < 0) {
     perror("setsockopt: TCP_NODELAY");
   }
+  if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on)) < 0) {
+    perror("setsockopt: SO_KEEPALIVE");
+  }
+  const int timeout = thread->conf.num_read_timeout_seconds;
+  if (setsockopt(fd, SOL_TCP, TCP_KEEPINTVL, &timeout, sizeof(timeout)) < 0) {
+    perror("setsockopt: TCP_KEEPINTVL");
+  }
+  if (setsockopt(fd, SOL_TCP, TCP_KEEPIDLE, &timeout, sizeof(timeout)) < 0) {
+    perror("setsockopt: TCP_KEEPIDLE");
+  }
+
   return fd;
 
 ERROR:
@@ -244,7 +271,7 @@ static void flush_send_buffer(rts_thread_t *thread, rts_peer_t *peer) {
           w -= len;
           ++peer->send_offset;
         } else {
-          iov->iov_base = (char*)iov->iov_base + w;
+          iov->iov_base = (char *)iov->iov_base + w;
           iov->iov_len -= w;
           if (iov->iov_len == 0) {
             unset_sending(peer);
@@ -284,19 +311,21 @@ static void close_peer(rts_thread_t *thread, rts_peer_t *peer) {
 
 #define UNUSE(X) (void) X
 static void noop_on_connect(rts_peer_t *peer) { UNUSE(peer); }
-static void noop_on_read(rts_peer_t *peer, char *buf, size_t len) { rts_close(peer); UNUSE(buf); UNUSE(len); }
+static void noop_on_read(rts_peer_t *peer, char *buf, size_t len) {
+  rts_close(peer);
+  UNUSE(buf);
+  UNUSE(len);
+}
 static void noop_on_close(rts_peer_t *peer) { UNUSE(peer); }
 static void noop_on_send_end(rts_peer_t *peer) { UNUSE(peer); }
 #undef UNUSE
 
 // -- switch platform -------------------------------------
 // TODO support kqueue and poll
-#if EPOLL_CTL_ADD
 #include "rts_epoll.h"
-#endif
 
-static void* spawn_server(void* arg) {
-  rts_thread_t *thread = (rts_thread_t*)arg;
+static void *spawn_server(void *arg) {
+  rts_thread_t *thread = (rts_thread_t *)arg;
   event_main(thread);
   return NULL;
 }
@@ -306,6 +335,7 @@ int rts_main(rts_t *rts) {
   assert(rts->conf.num_threads > 0);
 
   signal(SIGPIPE, SIG_IGN);
+
   int listen_fd = try_listen(rts);
   if (listen_fd < 0) {
     return -1;
@@ -313,7 +343,7 @@ int rts_main(rts_t *rts) {
   rts->num_threads = rts->conf.num_threads;
   rts->threads = malloc(sizeof(rts_thread_t) * rts->num_threads);
   memset(rts->threads, 0, sizeof(rts_thread_t) * rts->num_threads);
-  for (int i=0; i<rts->conf.num_threads; ++i) {
+  for (int i = 0; i < rts->conf.num_threads; ++i) {
     rts_thread_t *th = rts->threads + i;
     th->listen_fd = listen_fd;
     th->conf = rts->conf;
@@ -323,26 +353,24 @@ int rts_main(rts_t *rts) {
   }
 
   rts->is_ready = 1;
-  for (int i=1; i<rts->conf.num_threads; ++i) {
+  for (int i = 1; i < rts->conf.num_threads; ++i) {
     rts_thread_t *th = rts->threads + i;
     if (pthread_create(&th->pthread, NULL, spawn_server, (void *)th) < 0) {
       perror("pthread_create");
     }
   }
+
   int ret = event_main(rts->threads);
 
-  for (int i=1; i<rts->conf.num_threads; ++i) {
+  for (int i = 1; i < rts->conf.num_threads; ++i) {
     rts_thread_t *th = rts->threads + i;
-    if (pthread_cancel(th->pthread) < 0) {
-      perror("pthread_cancel");
-    }
     if (pthread_join(th->pthread, NULL) < 0) {
       perror("pthread_join");
     }
   }
   rts->is_ready = 0;
 
-  for (int i=0; i<rts->conf.num_threads; ++i) {
+  for (int i = 0; i < rts->conf.num_threads; ++i) {
     rts_thread_t *th = rts->threads + i;
     free(th->read_buffer);
     free_peer(th->pool_peer);
@@ -352,6 +380,7 @@ int rts_main(rts_t *rts) {
   if (close(listen_fd) < 0) {
     perror("close");
   }
+
   return ret;
 }
 
@@ -382,7 +411,7 @@ void rts_send(rts_peer_t *peer, void *buf, size_t len) {
 void rts_close(rts_peer_t *peer) { set_close(peer); }
 
 void rts_shutdown(rts_t *rts) {
-  for(int i=0; i<rts->num_threads; ++i) {
+  for (int i = 0; i < rts->num_threads; ++i) {
     rts_thread_t *th = rts->threads + i;
     th->is_shutdown = 1;
   }
@@ -393,9 +422,10 @@ void rts_init(rts_t *rts) {
   rts->conf.node = "*";
   rts->conf.service = "8888";
   rts->conf.backlog = 65535;
-  rts->conf.num_threads = 2;
+  rts->conf.num_threads = 4;
+  rts->conf.num_events = 256;
   rts->conf.num_read_buffer = 8192;
-  rts->conf.num_read_timeout_ms = 1000;
+  rts->conf.num_read_timeout_seconds = 180;
   rts->conf.num_max_connections = 1000 * 1000;
   rts->conf.on_connect = noop_on_connect;
   rts->conf.on_read = noop_on_read;
@@ -403,49 +433,35 @@ void rts_init(rts_t *rts) {
   rts->conf.on_close = noop_on_close;
 }
 
+void rts_stat(rts_t *rts, rts_stat_t *stat) {
+  memset(stat, 0, sizeof(rts_stat_t));
+  for (int i = 0; i < rts->num_threads; ++i) {
+    rts_thread_t *th = rts->threads + i;
+    rts_stat_t *s = &(th->stat);
+    stat->current_connections += s->current_connections;
+    stat->accept += s->accept;
+    stat->read_count += s->read_count;
+    stat->write_count += s->write_count;
+    stat->read_bytes += s->read_bytes;
+    stat->write_bytes += s->write_bytes;
+    stat->close_normal += s->close_normal;
+    stat->close_by_peer += s->close_by_peer;
+    stat->close_error += s->close_error;
+    stat->close_max_connections += s->close_max_connections;
+    stat->empty_read_connections += s->empty_read_connections;
+    stat->empty_write_connections += s->empty_write_connections;
+  }
+}
+
 void rts_dump(FILE *stream, rts_t *rts) {
   rts_conf_t *c = &(rts->conf);
   rts_stat_t a;
-  memset(&a, 0, sizeof(rts_stat_t));
-  for (int i=0; i<rts->num_threads; ++i) {
-    rts_thread_t *th = rts->threads + i;
-    rts_stat_t *s = &(th->stat);
-    a.accept += s->accept;
-    a.read_count += s->read_count;
-    a.write_count += s->write_count;
-    a.read_bytes += s->read_bytes;
-    a.write_bytes += s->write_bytes;
-    a.close_normal += s->close_normal;
-    a.close_by_peer += s->close_by_peer;
-    a.close_error += s->close_error;
-    a.close_max_connections += s->close_max_connections;
-    a.empty_read_connections += s->empty_read_connections;
-    a.empty_write_connections += s->empty_write_connections;
-    fprintf(stream,
-            "-- rts statistics %d\n"
-            "node                    %s\n"
-            "service                 %s\n"
-            "accept                  %llu\n"
-            "read count              %llu\n"
-            "write count             %llu\n"
-            "read bytes              %llu\n"
-            "write bytes             %llu\n"
-            "close normal            %llu\n"
-            "close by peer           %llu\n"
-            "close error             %llu\n"
-            "close max_connections   %llu\n"
-            "empty read connections  %llu\n"
-            "empty write connections %llu\n",
-            i,
-            c->node, c->service, s->accept, s->read_count, s->write_count,
-            s->read_bytes, s->write_bytes, s->close_normal, s->close_by_peer,
-            s->close_error, s->close_max_connections, s->empty_read_connections,
-            s->empty_write_connections);
-  }
+  rts_stat(rts, &a);
   fprintf(stream,
           "-- rts statistics all\n"
           "node                    %s\n"
           "service                 %s\n"
+          "current connections     %d\n"
           "accept                  %llu\n"
           "read count              %llu\n"
           "write count             %llu\n"
@@ -456,9 +472,16 @@ void rts_dump(FILE *stream, rts_t *rts) {
           "close error             %llu\n"
           "close max_connections   %llu\n"
           "empty read connections  %llu\n"
-          "empty write connections %llu\n",
-          c->node, c->service, a.accept, a.read_count, a.write_count,
-          a.read_bytes, a.write_bytes, a.close_normal, a.close_by_peer,
-          a.close_error, a.close_max_connections, a.empty_read_connections,
-          a.empty_write_connections);
+          "empty write connections %llu\n"
+          "accepts per thread     ",
+          c->node, c->service, a.current_connections, a.accept, a.read_count,
+          a.write_count, a.read_bytes, a.write_bytes, a.close_normal,
+          a.close_by_peer, a.close_error, a.close_max_connections,
+          a.empty_read_connections, a.empty_write_connections);
+  for (int i = 0; i < rts->num_threads; ++i) {
+    rts_thread_t *th = rts->threads + i;
+    rts_stat_t *s = &(th->stat);
+    fprintf(stream, " %llu", s->accept);
+  }
+  fprintf(stream, "\n");
 }

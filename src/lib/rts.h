@@ -13,7 +13,6 @@ typedef struct {
   int send_offset;
   int send_len;
   int send_cap;
-  struct sockaddr_storage addr;
   unsigned int total_read_bytes;
   unsigned int total_write_bytes;
 } rts_peer_t;
@@ -23,8 +22,9 @@ typedef struct {
   const char *service;
   int backlog;
   int num_threads;
+  int num_events;
   int num_read_buffer;
-  int num_read_timeout_ms;
+  int num_read_timeout_seconds;
   int num_max_connections;
   void (*on_connect)(rts_peer_t *peer);
   void (*on_read)(rts_peer_t *peer, char *buf, size_t length);
@@ -33,6 +33,7 @@ typedef struct {
 } rts_conf_t;
 
 typedef struct {
+  int current_connections;
   unsigned long long accept;
   unsigned long long read_count;
   unsigned long long write_count;
@@ -51,7 +52,6 @@ typedef struct {
   pthread_t pthread;
   rts_stat_t stat;
   int listen_fd;
-  int num_connections;
   char *read_buffer;
   size_t read_buffer_length;
   rts_peer_t *pool_peer;
@@ -67,6 +67,7 @@ typedef struct {
 
 void rts_init(rts_t *rts);
 int rts_main(rts_t *rts);
+void rts_stat(rts_t *rts, rts_stat_t *stat);
 void rts_shutdown(rts_t *rts);
 void rts_send(rts_peer_t *peer, void *buf, size_t length);
 void rts_close(rts_peer_t *peer);
