@@ -1,6 +1,6 @@
 #include "test.h"
 
-#define BIG_PACKET 1 * 1000 * 1000
+#define BIG_PACKET 100 * 1000 * 1000
 
 static int send_recv(int fd, size_t size) {
   char *msg = malloc(size + 1);
@@ -28,7 +28,7 @@ int main() {
   run_test(test3, 1);
   check(stat.accept == 1);
   check(stat.read_count > 1);
-  check(stat.write_count >= 1);
+  check(stat.write_count > 1);
   check(stat.read_bytes == BIG_PACKET);
   check(stat.write_bytes == BIG_PACKET);
   check(stat.close_by_peer == 1);

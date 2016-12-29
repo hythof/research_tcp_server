@@ -23,6 +23,7 @@ typedef struct {
   int backlog;
   int num_threads;
   int num_events;
+  int num_write_buffer;
   int num_read_buffer;
   int num_read_timeout_seconds;
   int num_max_connections;

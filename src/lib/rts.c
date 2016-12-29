@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include <pthread.h>
+#include <limits.h>
 #include "rts.h"
 
 #define PEER_READING 0x01
@@ -63,6 +64,7 @@ static void set_sending(rts_peer_t *peer) {
 static rts_peer_t *malloc_peer() {
   rts_peer_t *peer = malloc(sizeof(rts_peer_t));
   peer->flags = PEER_READING;
+  peer->user = NULL;
   peer->send_iov = peer->send_fixed_iov;
   peer->send_offset = 0;
   peer->send_len = 0;
@@ -73,6 +75,7 @@ static rts_peer_t *malloc_peer() {
 
 static void init_peer(rts_peer_t *peer) {
   peer->flags = PEER_READING;
+  peer->user = NULL;
   peer->send_offset = 0;
   peer->send_len = 0;
 }
@@ -245,42 +248,50 @@ static void fill_read_buffer(rts_thread_t *thread, int fd, rts_peer_t *peer) {
 }
 
 static void flush_send_buffer(rts_thread_t *thread, rts_peer_t *peer) {
-  if (is_sending(peer)) {
-    struct iovec *iov = peer->send_iov + peer->send_offset;
-    size_t iov_len = peer->send_len - peer->send_offset;
-    ssize_t writed = writev(peer->fd, iov, iov_len);
+  if (!is_sending(peer)) {
+    return;
+  }
 
-    if (writed < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        // pass
-      } else {
-        perror("write");
-        set_broken_send(peer);
-        thread->conf.on_send_end(peer);
-      }
-
+  // writev
+  struct iovec *iov = peer->send_iov + peer->send_offset;
+  size_t iov_len = peer->send_len - peer->send_offset;
+  iov_len = iov_len < IOV_MAX ? iov_len : IOV_MAX;
+  ssize_t writed = writev(peer->fd, iov, iov_len);
+  if (writed < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      // pass
     } else {
-      thread->stat.write_bytes += writed;
-      thread->stat.write_count++;
-      size_t w = writed;
-      while (1) {
-        assert(peer->send_len > 0);
-        struct iovec *iov = peer->send_iov + peer->send_offset;
-        size_t len = iov->iov_len;
-        if (len < w) {
-          w -= len;
-          ++peer->send_offset;
-        } else {
-          iov->iov_base = (char *)iov->iov_base + w;
-          iov->iov_len -= w;
-          if (iov->iov_len == 0) {
-            unset_sending(peer);
-            peer->total_write_bytes += writed;
-            thread->conf.on_send_end(peer);
-          }
-          break;
-        }
+      perror("writev");
+      set_broken_send(peer);
+      thread->conf.on_send_end(peer);
+    }
+    return;
+  }
+
+  // update send parameter
+  peer->total_write_bytes += writed;
+  thread->stat.write_bytes += writed;
+  thread->stat.write_count++;
+  size_t w = writed;
+  while (1) {
+    assert(peer->send_len > 0);
+    struct iovec *iov = peer->send_iov + peer->send_offset;
+    size_t len = iov->iov_len;
+
+    if (len < w) {
+      w -= len;
+      ++peer->send_offset;
+      thread->conf.on_send_end(peer);
+    } else {
+      if (w == len) {
+        assert(peer->send_offset + 1 == peer->send_len);
+        unset_sending(peer);
+        thread->conf.on_send_end(peer);
+      } else {
+        iov->iov_base = (char *)iov->iov_base + w;
+        iov->iov_len -= w;
       }
+      break;
     }
   }
 }
@@ -385,6 +396,7 @@ int rts_main(rts_t *rts) {
 }
 
 void rts_send(rts_peer_t *peer, void *buf, size_t len) {
+  assert(!is_broken_send(peer));
   assert(peer->send_len <= peer->send_cap);
   assert(len > 0);
   assert(buf != NULL);
@@ -424,6 +436,7 @@ void rts_init(rts_t *rts) {
   rts->conf.backlog = 65535;
   rts->conf.num_threads = 4;
   rts->conf.num_events = 256;
+  rts->conf.num_write_buffer = 8192;
   rts->conf.num_read_buffer = 8192;
   rts->conf.num_read_timeout_seconds = 180;
   rts->conf.num_max_connections = 1000 * 1000;

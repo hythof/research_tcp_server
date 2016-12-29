@@ -17,15 +17,20 @@
 rts_t rts;
 rts_stat_t stat;
 int num_test_fail = 0;
+int num_on_read = 0;
+int num_on_send_end = 0;
 
 static void on_read(rts_peer_t *peer, char *buf, size_t len) {
   char *echo = malloc(len);
   memcpy(echo, buf, len);
-  peer->user = echo;
   rts_send(peer, echo, len);
+  ++num_on_read;
 }
 
-static void on_send_end(rts_peer_t *peer) { free(peer->user); }
+static void on_send_end(rts_peer_t *peer) {
+  (void)peer;
+  ++num_on_send_end;
+}
 
 static void handle_signal(int no) {
   if (no == SIGUSR1) {
@@ -35,7 +40,7 @@ static void handle_signal(int no) {
 
 static void run_echo_server(const char *service) {
   if (signal(SIGUSR1, handle_signal) == SIG_ERR) {
-    perror("signal");
+    perror("test signal");
   }
 
   rts_init(&rts);
@@ -56,7 +61,7 @@ static void *spawn_server(void *arg) {
 static int do_connect() {
   int s = socket(AF_INET, SOCK_STREAM, 0);
   if (s < 0) {
-    perror("socket");
+    perror("test socket");
     exit(1);
   }
   struct sockaddr_in addr;
@@ -65,7 +70,7 @@ static int do_connect() {
   addr.sin_family = AF_INET;
   addr.sin_addr.s_addr = inet_addr("127.0.0.1");
   if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-    perror("connect()");
+    perror("test connect");
     close(s);
     exit(2);
   }
@@ -96,7 +101,7 @@ static void check_core(int cond, const char *file, int line) {
 static void run_test_core(int (*f)(int), int n) {
   pthread_t pt;
   if (pthread_create(&pt, NULL, spawn_server, NULL) < 0) {
-    perror("pthread_create");
+    perror("test pthread_create");
     exit(-1);
   }
   while (!rts.is_ready) {
@@ -127,11 +132,13 @@ static void run_test_core(int (*f)(int), int n) {
   }
 
   if (raise(SIGUSR1) < 0) {
-    perror("kill");
+    perror("test raise");
   }
   if (pthread_join(pt, NULL) < 0) {
-    perror("pthread_join");
+    perror("test pthread_join");
   }
+
+  check(num_on_read == num_on_send_end);
 }
 static void run_test(int (*f)(int), int n) {
   int backup_num_max_connections = rts.conf.num_max_connections;
@@ -140,15 +147,12 @@ static void run_test(int (*f)(int), int n) {
   rts.conf.num_max_connections = backup_num_max_connections;
 }
 
-#define max(A, B) (A > B ? A : B)
-#define min(A, B) (A < B ? A : B)
-
 static int post(int fd, char *msg) {
   int len = strlen(msg);
   while (len > 0) {
     int writed = write(fd, msg, len);
     if (writed == -1) {
-      perror("write");
+      perror("test write");
       return -1;
     } else {
       msg += writed;
@@ -166,7 +170,7 @@ static int recv_and_cmp(int fd, const char *msg) {
   while (rest > 0) {
     int readed = read(fd, buf + (len - rest), rest);
     if (readed == -1) {
-      perror("read");
+      perror("test read");
     } else if (readed == 0) {
       return -1;
     } else {
