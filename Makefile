@@ -10,11 +10,22 @@ format:
 	@clang-format -style=Google -i benchmark/*.[ch] test/*.[ch] src/**/*.[ch]
 
 profile: compile
-	@CPUPROFILE=/tmp/cpu.prof LD_PRELOAD=/usr/lib/libprofiler.so.0 ./bin/httpd_profile &
-	@-ab -q -n 100000 -c 1000 http://localhost:8880/ | grep Request
-	@pkill -USR1 httpd_profile
+	@CPUPROFILE=/tmp/cpu.prof LD_PRELOAD=/usr/lib/libprofiler.so.0 ./bin/profile &
+	@-ab -q -n 1000000 -c 1000 http://localhost:8880/ | grep Request
+	@pkill -USR1 profile
+	@sleep 1
 	@echo "-- gperf"
-	@google-pprof --text bin/httpd_profile /tmp/cpu.prof
+	@google-pprof --text bin/profile /tmp/cpu.prof
+
+perf: compile
+	@perf record ./bin/profile &
+	@sleep 1
+	@-ab -q -n 100000 -c 1000 http://localhost:8880/ | grep Request
+	@pkill -USR1 profile
+	@sleep 1
+	@echo "-- perf"
+	@perf report
+	@rm -f perf.data
 
 compile:
 	@mkdir -p bin
@@ -24,9 +35,9 @@ compile:
 	@${DEVELOP_CC}      test/main.c src/lib/*.c -o bin/test
 
 benchmark: compile
-	@./bin/httpd_product &
+	@./bin/product &
 	@-ab -q -n 100000 -c 1000 http://localhost:8880/
-	@pkill -USR1 httpd_product
+	@pkill -USR1 product
 	@sleep 1
 
 benchmark_go:
