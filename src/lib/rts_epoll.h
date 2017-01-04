@@ -23,22 +23,22 @@ static uint32_t events_by_peer(rts_peer_t *peer) {
   }
 }
 
-static int event_accept(rts_thread_t *thread, epoll_t *epoll,
+static int event_accept(rts_t *rts, epoll_t *epoll,
                         struct epoll_event *ev) {
   int epoll_fd = epoll->fd;
-  rts_peer_t *peer = thread->pool_peer;
+  rts_peer_t *peer = rts->pool_peer;
   init_peer(peer);
 
   // accept
-  int fd = try_accept(thread);
+  int fd = try_accept(rts);
   if (fd < 0) {
     return -1;
   }
   peer->fd = fd;
 
   // handle callback
-  thread->conf.on_connect(peer);
-  flush_send_buffer(thread, peer);
+  rts->conf.on_connect(peer);
+  flush_send_buffer(rts, peer);
 
   // judge next events
   int32_t new_events = events_by_peer(peer);
@@ -55,16 +55,16 @@ static int event_accept(rts_thread_t *thread, epoll_t *epoll,
   }
 
   // update status
-  thread->stat.current_connections++;
-  thread->pool_peer = malloc_peer();
+  rts->stat.current_connections++;
+  rts->pool_peer = malloc_peer();
 
   return 0;
 CLOSE:
-  close_peer(thread, peer);
+  close_peer(rts, peer);
   return -1;
 }
 
-static void event_handle(rts_thread_t *thread, epoll_t *epoll,
+static void event_handle(rts_t *rts, epoll_t *epoll,
                          struct epoll_event *ev) {
   int epoll_fd = epoll->fd;
   rts_peer_t *peer = (rts_peer_t *)ev->data.ptr;
@@ -72,9 +72,9 @@ static void event_handle(rts_thread_t *thread, epoll_t *epoll,
 
   // handle callback
   if (ev->events & EPOLLIN) {
-    fill_read_buffer(thread, fd, peer);
+    fill_read_buffer(rts, fd, peer);
   }
-  flush_send_buffer(thread, peer);
+  flush_send_buffer(rts, peer);
 
   // judge next events
   uint32_t new_events = events_by_peer(peer);
@@ -93,14 +93,14 @@ static void event_handle(rts_thread_t *thread, epoll_t *epoll,
   return;
 
 CLOSE:
-  close_peer(thread, peer);
+  close_peer(rts, peer);
   free_peer(peer);
-  thread->stat.current_connections--;
+  rts->stat.current_connections--;
 }
 
-int event_main(rts_thread_t *thread) {
+int event_main(rts_t *rts) {
   fflush(stdout);
-  const int event_count = thread->conf.num_events;
+  const int event_count = rts->conf.num_events;
 
   int epoll_fd = epoll_create1(EPOLL_CLOEXEC);
   if (epoll_fd < 0) {
@@ -117,15 +117,15 @@ int event_main(rts_thread_t *thread) {
   struct epoll_event ev;
   ev.events = EPOLLIN | EPOLLET;
   ev.data.ptr = NULL;
-  if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, thread->listen_fd, &ev)) {
+  if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, rts->listen_fd, &ev)) {
     free(epoll.events);
     return -1;
   }
 
-  while (!thread->is_shutdown) {
+  while (!rts->is_shutdown) {
     int nfds = epoll_wait(epoll_fd, events, event_count, 1 * 1000);
     if (nfds < 0) {
-      if (thread->is_shutdown) {
+      if (rts->is_shutdown) {
         break;
       } else {
         perror("epoll_wait");
@@ -135,10 +135,10 @@ int event_main(rts_thread_t *thread) {
     for (int i = 0; i < nfds; ++i) {
       struct epoll_event *ev = &events[i];
       if (ev->data.ptr == NULL) {
-        while (event_accept(thread, &epoll, ev) == 0) {
+        while (event_accept(rts, &epoll, ev) == 0) {
         }
       } else {
-        event_handle(thread, &epoll, ev);
+        event_handle(rts, &epoll, ev);
       }
     }
   }

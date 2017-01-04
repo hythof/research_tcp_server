@@ -21,7 +21,6 @@ typedef struct {
   const char *node;
   const char *service;
   int backlog;
-  int num_threads;
   int num_events;
   int num_write_buffer;
   int num_read_buffer;
@@ -50,20 +49,13 @@ typedef struct {
 
 typedef struct {
   rts_conf_t conf;
-  pthread_t pthread;
   rts_stat_t stat;
+  int is_ready;
   int listen_fd;
   char *read_buffer;
   size_t read_buffer_length;
-  rts_peer_t *pool_peer;
   volatile int is_shutdown;
-} rts_thread_t;
-
-typedef struct {
-  rts_conf_t conf;
-  int is_ready;
-  int num_threads;
-  rts_thread_t *threads;
+  rts_peer_t *pool_peer;
 } rts_t;
 
 void rts_init(rts_t *rts);

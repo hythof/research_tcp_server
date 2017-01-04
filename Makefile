@@ -1,7 +1,7 @@
-BASE_CC=gcc -std=c11 -Wall -W -D_GNU_SOURCE -D_POSIX_C_SOURCE=201112L -I src/lib/ -pthread
+BASE_CC=gcc -std=c11 -Wall -W -D_GNU_SOURCE -D_POSIX_C_SOURCE=201112L -I src/lib/
 PRODUCT_CC=${BASE_CC} -O2
 PROFILE_CC=${BASE_CC} -O2
-DEVELOP_CC=${BASE_CC} -Og -g -fno-inline
+DEVELOP_CC=${BASE_CC} -Og -g -fno-inline -pthread
 
 test: compile
 	@./bin/test
@@ -36,7 +36,8 @@ compile:
 
 benchmark: compile
 	@./bin/product &
-	@-ab -q -n 100000 -c 1000 http://localhost:8880/
+	@sleep 1
+	@-ab -q -n 1000000 -c 1000 http://localhost:8880/
 	@pkill -USR1 product
 	@sleep 1
 

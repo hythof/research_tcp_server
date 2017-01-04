@@ -121,8 +121,8 @@ static void run_test(int (*f)(int), int n) {
     close(s);
   }
 
-  for (int i=0; i<1000; ++i) {
-    rts_stat(&rts, &stat);
+  while (1) {
+    stat = rts.stat;
     if (stat.accept > 0 && stat.current_connections == 0) {
       break;
     }
