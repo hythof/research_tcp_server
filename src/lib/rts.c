@@ -275,6 +275,9 @@ static void flush_send_buffer(rts_thread_t *thread, rts_peer_t *peer) {
   size_t w = writed;
   while (1) {
     assert(peer->send_len > 0);
+    assert(w > 0);
+    assert(peer->send_offset < peer->send_len);
+
     struct iovec *iov = peer->send_iov + peer->send_offset;
     size_t len = iov->iov_len;
 
@@ -282,15 +285,16 @@ static void flush_send_buffer(rts_thread_t *thread, rts_peer_t *peer) {
       w -= len;
       ++peer->send_offset;
       thread->conf.on_send_end(peer);
-    } else {
-      if (w == len) {
-        assert(peer->send_offset + 1 == peer->send_len);
+    } else if (len == w) {
+      ++peer->send_offset;
+      thread->conf.on_send_end(peer);
+      if (peer->send_offset == peer->send_len) {
         unset_sending(peer);
-        thread->conf.on_send_end(peer);
-      } else {
-        iov->iov_base = (char *)iov->iov_base + w;
-        iov->iov_len -= w;
       }
+      break;
+    } else {
+      iov->iov_base = (char *)iov->iov_base + w;
+      iov->iov_len -= w;
       break;
     }
   }
